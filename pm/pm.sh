@@ -488,7 +488,7 @@ then: pm bash <container-name>"
 _pm_run_rollback() {
   local out
   podman container exists -- "$_pm_run_name" 2>/dev/null \
-    && podman rm --force -- "$_pm_run_name" >/dev/null 2>&1
+    && podman rm -f -- "$_pm_run_name" >/dev/null 2>&1
   [[ -n ${_pm_run_net-} ]] || return 0
   out=$(podman network rm -- "$_pm_run_net" 2>&1) \
     || _pm_err "network $_pm_run_net: $out"
@@ -543,7 +543,7 @@ container uses that network
   --force      stop a running container first
   <container>  container to remove; completion lists all containers
 
-runs: podman rm [--force] <container>
+runs: podman rm [-f] <container>
       podman network rm <network>'
   local force=0 c='' a out state net label users rc=0
   local -a lines rmopt=()
@@ -573,7 +573,7 @@ runs: podman rm [--force] <container>
     _pm_err "container $c is $state; stop it with: pm stop $c, or use: pm rm --force $c"
     return 1
   fi
-  (( force )) && rmopt=(--force)
+  (( force )) && rmopt=(-f)
   if out=$(podman rm "${rmopt[@]}" -- "$c" 2>&1); then
     _pm_ok "container $c removed"
   else

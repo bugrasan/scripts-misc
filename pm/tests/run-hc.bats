@@ -396,7 +396,7 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   export STUB_RUN_RC=125
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 1
-  podman_find -x rm --force -- pm-proj
+  podman_find -x rm -f -- pm-proj
   podman_find -x network rm -- proj
   if podman_find exec; then fail 'unexpected podman exec'; fi
   is_id "$(<"$P/herdr-machine-id")"
@@ -411,7 +411,7 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   state=$(ls -A "$HC")
   run --separate-stderr pm rm --force pm-proj
   expect_status 0
-  podman_find -x rm --force -- pm-proj
+  podman_find -x rm -f -- pm-proj
   [ "$(<"$P/herdr-machine-id")" = "$id" ]
   [ "$(ls -A "$HC")" = "$state" ]
 }
