@@ -236,11 +236,11 @@ hc_serve_shell() {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG" "$CTR2"
   expect_status 1
   has_line "$stderr" "error the folder $DIR or its herdr-core state folder is already mounted by: $CTR; pm does not support a second container on the same folder, for consistency reasons"
+  local err=$stderr line
   run podman container exists -- "$CTR2"
   [ "$status" -ne 0 ]
   # the example creates a plain second container as printed
-  local line
-  line=$(grep -m1 '^  podman run ' <<<"$stderr") || fail "no example in: $stderr"
+  line=$(grep -m1 '^  podman run ' <<<"$err") || fail "no example in: $err"
   eval "$line" >/dev/null
   podman container exists -- "$CTR2-2"
 }

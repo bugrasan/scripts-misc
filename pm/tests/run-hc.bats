@@ -428,7 +428,7 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   fake_hash openssl
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
-  [ "$(<"$STUB_HASH_LOG")" = sha256sum ]
+  [ "$(sort -u -- "$STUB_HASH_LOG")" = sha256sum ]
   [[ -d $HC/proj-$(sha256_hex "$(<"$P/herdr-machine-id")") ]]
 }
 
@@ -440,7 +440,7 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   mkdir "$P/.devcontainer"
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
-  [ "$(<"$STUB_HASH_LOG")" = 'shasum -a 256' ]
+  [ "$(sort -u -- "$STUB_HASH_LOG")" = 'shasum -a 256' ]
   [[ -d $HC/proj-$(ref_id "$P") ]]
 }
 
@@ -450,7 +450,7 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   fake_hash openssl
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
-  [ "$(<"$STUB_HASH_LOG")" = 'openssl dgst -sha256 -r' ]
+  [ "$(sort -u -- "$STUB_HASH_LOG")" = 'openssl dgst -sha256 -r' ]
   [[ -d $HC/proj-$(sha256_hex "$(<"$P/herdr-machine-id")") ]]
 }
 

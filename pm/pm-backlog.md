@@ -98,19 +98,44 @@ Observed with podman 6.2.0 and hc 0.1.21:
 ## v9 (delivered in pm.sh, PM_VERSION=9)
 
 - V9-01 `PM_VERSION=9`: `pm --version` prints `pm 9`, and `pm run` labels containers and networks with `pm-script=9`
-- V9-02 BUG-10: the herdr-core section of `pm run --help` and the readme say that pm notes other podman containers that already mount the state folder; `podman ps` sees only this user's podman containers, so containers of other engines, such as a dev container under Docker, are not detected
-- V9-03 BUG-11: the note reads correctly for one or many names: `pm run: note: the herdr-core state folder <path> is already mounted by: <names>; only one hc serve can run for it, and hc in every such container uses that core`
+- V9-02 BUG-10: superseded by V9-14, which removed the v8 note about other containers on the state folder; the error that replaced it says that pm sees only podman containers, not those of other engines such as a dev container under Docker, and compares paths as spelled
+- V9-03 BUG-11: superseded by V9-14 together with that note; the error names every container in the form `is already mounted by: <names>`, which reads right for one or many
 - V9-04 BUG-12: the tests read pm.sh as bytes (`LC_ALL=C grep -a` in `pm_internal`), so under the GBK test locale they evaluate the whole script; grep used to drop the lines with an n-dash
 - V9-05 every force option on pm's own command line is the long form only: `pm rm` accepts `--force` before or after the container and rejects `-f` like any other unknown option (usage to stderr, exit 2); the help, `pm help`, the readme (quick start: `pm rm --force pm-myapp`), the hint for a running or paused container (`stop it with: pm stop <container>, or use: pm rm --force <container>`), and both completions follow (no `-f`; containers after `--force`); `pm sh-file --force` and `pm zsh-file --force` already complied, and pm has no other force option
+- V9-06 D15: after `hc serve` started, `pm run --hc` adds the container to hc on the host as a machine: `hc machine add --name <container> --via '<podman> exec -i <container> sh -c' </dev/null`, with podman's absolute path, single-quoted for sh when it holds other characters than letters, digits, and `/ . _ + -`; the ok line reads `hc machine <container> added`
+- V9-07 D16: the machine name is the container name; with `--hc`, a name that hc's check_name rejects (1-32 of a-z 0-9 - _ ., a letter or digit first, not shaped like a terminal id such as t7 or t1b) is a usage error (exit 2) before anything happens, with a hint to pass a valid `<container-name>`; this covers names made from a folder with capitals, such as `pm-MyApp`
+- V9-08 D17: `pm run --hc` adds the label `pm-hc=<machine name>`; `pm start` and `pm rm` act on herdr only for containers with it
+- V9-09 D18: when `hc machine ls --json` already lists a machine of that name with pm's connection (`via` true, the same target), pm keeps it with `pm run: note: hc machine <name> already connects to this container; kept`; with any other connection, a red error and exit 1, and the container stays
+- V9-10 D19: without `hc` on PATH, `pm run: note: no hc on PATH, so <container> is not added as an hc machine`; no machine, and the container and its core stay (exit 0)
+- V9-11 D20: any other failure of `hc machine ls` or `hc machine add` is a red error with hc's output and exit 1; the container stays
+- V9-12 D21: `pm rm`, after removing a labeled container: `hc machine rm <name>` while the entry still has pm's connection to it; skip lines when the entry is gone, has another connection, or hc is not on PATH; a failure is a red error and exit 1, like a failed network removal
+- V9-13 D22: `pm start`, for a labeled container and after `podman start` succeeds: `podman exec -d -e SHELL=/bin/bash -- <container> hc serve`, with the ok and error lines of `pm run`; a running core makes the new `hc serve` exit at once
+- V9-14 D23: pm never creates a second container for one folder: with `--mount`, before it creates anything, one `podman container inspect` of all containers (any state) compares their bind-mount sources (any target) with the folder and, with `--hc`, with its state folder when that is known (the dev container's, or the one of a valid id file); a match is a red error, exit 1, naming the containers, with a plain `podman run -d --init --userns=keep-id -v <abs>:/workspaces/<base> --name <name>-2 <image> sleep infinity` (one mount, podman's default network, no herdr-core, values quoted with `printf %q`) for a second container made by hand; only podman containers and the same path spelling are found
+- V9-15 D25: `pm run --help` (the `--hc` and `<container-name>` lines, a new section `one container per folder:`, the herdr-core section, and `runs:`), `pm start --help`, `pm rm --help`, `pm help` (start and rm lines), and the readme (HERDR-CORE and a new ONE CONTAINER PER FOLDER section) cover V9-06 to V9-14; the completions needed no change
 
 Decisions:
 
 - the long-form rule covers pm's own options only; calls to other tools keep their flags as in v8 (`podman rm -f` in `pm rm` and in the rollback of a failed `pm run`, `rm -f`, `mv -f`, `ln -sf`), so `pm rm --help` still shows the podman call as `podman rm [-f] <container>`
+- `hc machine add` gets no `--install` and no stdin, so pm never prompts and never copies hc into a container; an image whose hc is missing or too old makes the add fail with hc's output (V9-11)
+- the container name is the machine name; pm does not rewrite a name hc refuses, it asks for a valid one
+- podman sets labels only when it creates a container, so containers made without `--hc` or by an older pm get no herdr handling; make them again with `pm run --hc`
+- pm compares an existing entry with the connection command it would give now (podman's current path); a machine added by hand with the same command, as in the owner's guide, counts as pm's; pm rm leaves an entry with another connection alone
+- `pm start` now starts the core of a labeled container; this replaces the v8 decision that `pm start` does not start it
+- V9-14 replaces the v8 note about other containers on the state folder (V8-14 and its decision); pm does not support a second container on one folder, for consistency reasons
+- pm reads `hc machine ls --json` without jq: hc prints compact JSON with sorted keys and flat machine objects, and pm looks for `"name":`, `"target":` (escaped like hc does), and `"via":true` inside one object
+
+Observed with podman 6.2.0 and hc 0.1.21:
+
+- `hc machine ls --json` prints one line, for example `{"machines":[{"host":"404d6d312073","id":"dfde4c45d259fd48ac478feaff361af0","keeps_running_after_logout":null,"logout_linger_user":null,"name":"pm-x","session":null,"state":"connecting","target":"/usr/local/bin/podman exec -i pm-x sh -c","temporary":false,"version":"0.1.21","via":true}]}`; `hc machine add` prints the new machine the same way, `hc machine rm` prints `{"removed":"pm-x"}`
+- errors are JSON as well: a taken name gives `{"error":{"hint":"pick another with --name","kind":"name_taken","message":"\"pm-x\" is already a machine here"}}` and exit 1 before hc dials; the same core under another name `already_added` (exit 1), an invalid name `invalid_params` (exit 6), an unknown machine for rm `machine_unknown` (exit 4), and a stopped container `unreachable` (exit 1)
+- the host core runs the via command with its own environment, so it must keep podman's `XDG_RUNTIME_DIR`; the tests isolate it with `XDG_STATE_HOME` and `HC_SOCKET`; without systemd, the first hc command warns `hc: no systemd user manager here: the core ends with whatever started it`
 
 Tests (bats-core, `pm/tests/`):
 
-- new `rm.bats` (6 stub tests) for V9-05; `completion.bats` checks `pm rm` in both shells; `run-hc.bats` checks V9-01 to V9-03; `run-hc.bats` and `run-hc-podman.bats` use `pm rm --force` and the new note
-- against v8, 9 of the 64 stub tests fail; v9 passes all 64 as root and as a normal user (as root, the unreadable id file test skips)
+- new `rm.bats` (6 stub tests) for V9-05; `completion.bats` checks `pm rm` in both shells; `run-hc.bats` checks V9-01; `run-hc.bats` and `run-hc-podman.bats` use `pm rm --force`
+- new `hc-machine.bats` (20 stub tests, V9-06 to V9-13 and the help) with a fake host `hc` (`stub/hc`) that logs every call, and `one-folder.bats` (7 stub tests, V9-14); the fake podman also records mounts and labels; tests that run pm twice on one folder drop the first fake container first
+- integration: `run-hc-podman.bats` (5 tests) takes hc from the image as the host's hc for a real machine (add, `hc exec --on <name> uname -a`, `pm start` with `SHELL=/bin/bash`, `pm rm --force`), and its second-container test runs the printed `podman run` line
+- against v9 phase 1 (eb7edd8), 25 of the 90 stub tests fail; v9 passes all 90 as root and as a normal user (as root, the unreadable id file test skips), and all 5 integration tests
 
 ## Open findings
 

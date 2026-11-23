@@ -3,6 +3,9 @@
 # decisions D15 to D22): a fake podman and a fake host hc (stub/hc) log
 # every call, and HOME is a per-test folder; no real podman or hc runs
 # run: bats pm/tests/hc-machine.bats
+# shellcheck disable=SC2016,SC2030,SC2031
+# SC2016: literal backticks and $ on purpose; SC2030, SC2031: each bats
+# test runs in its own subshell, and its exports are meant for it alone
 
 load test_helper
 
