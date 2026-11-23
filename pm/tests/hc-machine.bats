@@ -144,7 +144,7 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   fake_hash sha256sum
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
-  has_line "$stderr" 'pm run: note: no hc on PATH, so pm-proj is not added as an hc machine'
+  has_line "$stderr" 'pm run: note: no hc on PATH, so pm-proj is not added as an hc machine; add it later with: pm hc-add pm-proj'
   hc_serve_call pm-proj
   if podman_find rm; then podman_show; fail 'pm removed the container'; fi
 }

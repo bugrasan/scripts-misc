@@ -10,12 +10,16 @@
 #   FAKE_HC_ADD_OUT  what a failing machine add prints
 #   FAKE_HC_RM_RC    exit status of machine rm (default 0)
 #   FAKE_HC_RM_OUT   what a failing machine rm prints
+#   FAKE_HC_VERSION  the version --version reports (default 0.1.21)
 
 printf '%q ' "$@" >>"${HC_LOG:?}"
 printf '\n' >>"$HC_LOG"
 none='{"machines":[]}'
 
 case "${1-} ${2-}" in
+  '--version '*)
+    printf 'hc %s\n' "${FAKE_HC_VERSION:-0.1.21}"
+    exit 0 ;;
   'machine ls')
     printf '%s\n' "${FAKE_HC_LS-$none}"
     exit "${FAKE_HC_LS_RC:-0}" ;;

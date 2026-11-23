@@ -28,7 +28,7 @@ stub_setup() {
   HC=$HOME/.config/herdr-core/container
   P=$T/proj
   mkdir -p "$HOME" "$STUB_BIN" "$FAKE_BIN" "$P"
-  mkdir -p "$STUB_STATE"/{containers,networks,mounts,labels}
+  mkdir -p "$STUB_STATE"/{containers,networks,status,mounts,labels,pmscript,create,cores,nohc,nosha,fs}
   : >"$PODMAN_LOG"
   : >"$HC_LOG"
   # the fake podman, and a fake host hc so that no real one is ever reached
@@ -47,7 +47,7 @@ use_min_path() {
   local t p
   mkdir -p "$MIN_BIN"
   for t in bash env cat mkdir chmod mv rm ln ls cp tr sed grep head tail cut \
-    sort wc dirname basename touch stat id uname sleep od; do
+    sort wc dirname basename touch stat id uname sleep od readlink ps; do
     if p=$(type -P "$t"); then ln -sf -- "$p" "$MIN_BIN/$t"; fi
   done
   PM_PATH=$FAKE_BIN:$STUB_BIN:$MIN_BIN
@@ -58,6 +58,19 @@ fake() {
   printf '#!%s\n%s\n' "$BASH" "$2" >"$FAKE_BIN/$1"
   chmod 755 "$FAKE_BIN/$1"
 }
+
+# fake_bash <version>: the bash on PM_PATH reports this version; any other
+# call runs the real bash, so #!/usr/bin/env bash scripts keep working
+fake_bash() {
+  fake bash "if [[ \${1-} == --version ]]; then
+  echo 'GNU bash, version $1(1)-release (x86_64-pc-linux-gnu)'
+  exit 0
+fi
+exec $(printf %q "$BASH") \"\$@\""
+}
+
+# fake_tool <name> <line>: a fake tool that prints <line> for --version
+fake_tool() { fake "$1" "printf '%s\n' $(printf %q "$2")"; }
 
 # fake_hash <tool>: fake sha256sum, shasum, or openssl that logs its call
 # to $STUB_HASH_LOG and prints the real digest in that tool's format
@@ -168,7 +181,10 @@ fake_container() {
 # forget_containers: drop all fake containers, so that the next pm run on
 # the same folder is no second container
 forget_containers() {
-  rm -f -- "$STUB_STATE"/containers/* "$STUB_STATE"/mounts/* "$STUB_STATE"/labels/*
+  local d
+  for d in containers status mounts labels pmscript create cores nohc nosha; do
+    rm -f -- "$STUB_STATE/$d"/*
+  done
 }
 
 # hc_find [-x] <arg>...: podman_find on the calls of the fake hc
@@ -188,6 +204,32 @@ hc_machine() {
 
 # json_str <text>: <text> as a JSON string (quotes and backslashes only)
 json_str() { local s=${1//\\/\\\\}; printf '"%s"' "${s//\"/\\\"}"; }
+
+# ps_row <id>: the line of pm ps output ($output) for a fake container,
+# whose ID is its name
+ps_row() { grep -m1 -E "^$1 " <<<"$output"; }
+
+# ps_cell <column> <row>: the cell of <row> below <column> of the header
+# (the first line of $output), trailing blanks removed; the cells line up
+# with the header words
+ps_cell() {
+  local head=${output%%$'\n'*} c pos i v
+  local -a names=() starts=()
+  for c in 'CONTAINER ID' NAME STATUS PM NETWORK CONT-HERDR HOST-HERDR PROJECT \
+    SECRET-CC CONFIG-CC SECRET-CP CONFIG-CP; do
+    [[ $head == *"$c"* ]] || continue
+    pos=${head%%"$c"*}
+    names+=("$c") starts+=("${#pos}")
+  done
+  for (( i = 0; i < ${#names[@]}; i++ )); do
+    [[ ${names[i]} == "$1" ]] || continue
+    if (( i + 1 < ${#names[@]} )); then v=${2:starts[i]:starts[i+1]-starts[i]}
+    else v=${2:starts[i]}; fi
+    printf '%s\n' "${v%"${v##*[![:space:]]}"}"
+    return 0
+  done
+  return 1
+}
 
 # no_create: pm created no network and no container
 no_create() {

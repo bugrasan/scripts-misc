@@ -3,43 +3,85 @@
 # line per call with every argument in printf %q form, and answers the
 # subcommands pm uses; it never runs a container
 #
-# state, below $STUB_STATE: containers/<name> (holding the network name),
-# mounts/<name> (one bind-mount source per line), labels/<name> (the value
-# of the pm-hc label), and networks/<name>, for each fake container and
-# network; container names double as IDs
+# state below $STUB_STATE, per fake container <name> (names double as IDs):
+#   containers/<name>  its network (one line, empty for podman's default)
+#   status/<name>      its state (default: $STUB_STATUS, else running)
+#   mounts/<name>      one bind mount per line, as <source>:<target>
+#   labels/<name>      the value of its pm-hc label
+#   pmscript/<name>    the value of its pm-script label
+#   create/<name>      its podman run arguments, one per line
+#   cores/<name>       present while hc serve runs in it
+#   nohc/<name>        present when it has no hc
+#   nosha/<name>       present when it has no sha256sum
+#   fs/<name>/...      its files, from podman cp
+# and networks/<name> per fake network
 # settings, all optional:
+#   STUB_PODMAN_VERSION version that --version reports (default 6.2.0)
+#   STUB_SECRETS        names of the podman secrets that exist
 #   STUB_RUN_RC         exit status of `run`; a failed run leaves the
 #                       container created, as podman does (default 0)
 #   STUB_START_RC       exit status of `start` (default 0)
-#   STUB_EXEC_RC        exit status of `exec` (default 0)
-#   STUB_EXEC_ERR       text `exec` prints to stderr
+#   STUB_EXEC_RC        exit status of `exec ... hc serve` (default 0)
+#   STUB_EXEC_ERR       text `exec ... hc serve` prints to stderr
+#   STUB_CP_RC          exit status of `cp` (default 0)
 #   STUB_NET_CREATE_RC  exit status of `network create` (default 0)
-#   STUB_STATUS         state `container inspect` reports (default running)
+#   STUB_STATUS         state of containers without a status file
 #   STUB_IMAGES, STUB_NETWORKS, STUB_PS
 #                       lines `image list`, `network ls`, and `ps` (without
-#                       -q) print
+#                       -q or a pm-hc label filter) print
 
 printf '%q ' "$@" >>"${PODMAN_LOG:?}"
 printf '\n' >>"$PODMAN_LOG"
 
-c=${STUB_STATE:?}/containers n=$STUB_STATE/networks
-m=$STUB_STATE/mounts l=$STUB_STATE/labels
+s=${STUB_STATE:?}
+c=$s/containers n=$s/networks
 last=${!#}   # pm passes the container or network last, after --
+us=$'\x1f' rs=$'\x1e'
+
+# status <name>: the state of a fake container
+status() { if [[ -e $s/status/$1 ]]; then cat -- "$s/status/$1"; else printf '%s\n' "${STUB_STATUS:-running}"; fi; }
+# val <dir> <name>: the content of a state file, or nothing
+val() { [[ ! -e $s/$1/$2 ]] || cat -- "$s/$1/$2"; }
 
 case ${1-} in
+  --version) printf 'podman version %s\n' "${STUB_PODMAN_VERSION:-6.2.0}"; exit 0 ;;
+  secret)
+    if [[ ${2-} == exists ]]; then
+      [[ " ${STUB_SECRETS-} " == *" $last "* ]]
+      exit
+    fi ;;
   container)
     case ${2-} in
       exists) [[ -e $c/$last ]]; exit ;;
       inspect)
-        # pm run: names and bind-mount sources of all containers at once
-        if [[ $* == *.Mounts* ]]; then
+        fmt=$4
+        # the formats of pm ps, pm ps --agents, and the mount scan of pm
+        # run inspect all given containers at once; fields as pm asks
+        if [[ $fmt == *NetworkMode* || $fmt == *CreateCommand* || $fmt == *.Mounts* ]]; then
           for id in "${@:5}"; do
             [[ -e $c/$id ]] || continue
-            printf '%s\x1f' "$id"
-            if [[ -e $m/$id ]]; then
-              while IFS= read -r src; do printf '%s\x1e' "$src"; done <"$m/$id"
+            net=$(val containers "$id") ms=''
+            if [[ $fmt == *NetworkMode* ]]; then
+              # pm ps: id, name, status, pm-script, devcontainer folder,
+              # target=source mounts, networks, network mode, pm-hc
+              if [[ -e $s/mounts/$id ]]; then
+                while IFS= read -r m; do ms+="${m#*:}=${m%%:*};"; done <"$s/mounts/$id"
+              fi
+              printf '%s\n' "$id$us$id$us$(status "$id")$us$(val pmscript "$id")$us$us$ms$us${net:+$net,}$us${net:+bridge}${net:-pasta}$us$(val labels "$id")"
+            elif [[ $fmt == *CreateCommand* ]]; then
+              # pm ps --agents: id, name, status, create command, secrets
+              cmd=''
+              if [[ -e $s/create/$id ]]; then
+                while IFS= read -r a; do cmd+=$a$rs; done <"$s/create/$id"
+              fi
+              printf '%s\n' "$id$us$id$us$(status "$id")$us$cmd$us"
+            else
+              # pm run: names and bind-mount sources
+              if [[ -e $s/mounts/$id ]]; then
+                while IFS= read -r m; do ms+=${m%%:*}$rs; done <"$s/mounts/$id"
+              fi
+              printf '%s\n' "$id$us$ms"
             fi
-            printf '\n'
           done
           exit 0
         fi
@@ -47,16 +89,18 @@ case ${1-} in
           printf 'Error: no such container %s\n' "$last" >&2
           exit 125
         fi
-        case $* in
+        case $fmt in
           # pm rm: the state, the pm-hc label, then one network per line
           *NetworkSettings*)
-            printf '%s\n' "${STUB_STATUS:-running}"
-            [[ $* != *pm-hc* ]] || printf '%s\n' "$(cat -- "$l/$last" 2>/dev/null)"
-            printf '%s\n' "$(<"$c/$last")" ;;
-          # pm start: the pm-hc label alone
-          *pm-hc*) printf '%s\n' "$(cat -- "$l/$last" 2>/dev/null)" ;;
+            status "$last"
+            [[ $fmt != *pm-hc* ]] || printf '%s\n' "$(val labels "$last")"
+            printf '%s\n' "$(val containers "$last")" ;;
+          # pm hc-add: the pm-hc label and the state
+          *pm-hc*State.Status*) printf '%s\n' "$(val labels "$last")$us$(status "$last")" ;;
+          # pm start, pm hc-rm: the pm-hc label alone
+          *pm-hc*) printf '%s\n' "$(val labels "$last")" ;;
           *State.Running*)
-            if [[ ${STUB_STATUS:-running} == running ]]; then echo true; else echo false; fi ;;
+            if [[ $(status "$last") == running ]]; then echo true; else echo false; fi ;;
           *) printf '[{"Name":"%s"}]\n' "$last" ;;
         esac
         exit 0 ;;
@@ -83,23 +127,29 @@ case ${1-} in
       ls) [[ -z ${STUB_NETWORKS-} ]] || printf '%s\n' "$STUB_NETWORKS"; exit 0 ;;
     esac ;;
   run)
-    # remember the container, its network, bind-mount sources, and pm-hc
-    # label for exists, inspect, and rm
-    args=("$@") name='' net='' label='' srcs=()
+    # remember the container, its network, mounts, labels, and arguments
+    args=("$@") name='' net='' label='' script='' vols=()
     for (( i = 1; i < ${#args[@]} - 1; i++ )); do
       case ${args[i]} in
         --name)    name=${args[i+1]} ;;
         --network) net=${args[i+1]} ;;
-        -v)        srcs+=("${args[i+1]%%:*}") ;;
-        --label)   [[ ${args[i+1]} != pm-hc=* ]] || label=${args[i+1]#pm-hc=} ;;
+        -v)        vols+=("${args[i+1]%:ro}") ;;
+        --label)
+          case ${args[i+1]} in
+            pm-hc=*)     label=${args[i+1]#pm-hc=} ;;
+            pm-script=*) script=${args[i+1]#pm-script=} ;;
+          esac ;;
       esac
     done
     if [[ -n $name ]]; then
       printf '%s\n' "$net" >"$c/$name"
-      (( ${#srcs[@]} == 0 )) || printf '%s\n' "${srcs[@]}" >"$m/$name"
-      [[ -z $label ]] || printf '%s\n' "$label" >"$l/$name"
+      printf '%s\n' "${args[@]}" >"$s/create/$name"
+      (( ${#vols[@]} == 0 )) || printf '%s\n' "${vols[@]}" >"$s/mounts/$name"
+      [[ -z $label ]] || printf '%s\n' "$label" >"$s/labels/$name"
+      [[ -z $script ]] || printf '%s\n' "$script" >"$s/pmscript/$name"
     fi
     if [[ ${STUB_RUN_RC:-0} != 0 ]]; then
+      [[ -z $name ]] || printf 'created\n' >"$s/status/$name"
       echo 'Error: stub: podman run failed' >&2
       exit "$STUB_RUN_RC"
     fi
@@ -111,17 +161,63 @@ case ${1-} in
       exit 125
     fi
     [[ ${STUB_START_RC:-0} == 0 ]] || { echo 'Error: stub: podman start failed' >&2; exit "$STUB_START_RC"; }
+    printf 'running\n' >"$s/status/$last"
     printf '%s\n' "$last"
     exit 0 ;;
+  top)
+    # args of the container's processes: the init, sleep, and the core
+    printf 'COMMAND\n/run/podman-init -- sleep infinity \nsleep infinity \n'
+    [[ ! -e $s/cores/$2 ]] || printf 'hc serve \n'
+    exit 0 ;;
   exec)
-    [[ -z ${STUB_EXEC_ERR-} ]] || printf '%s\n' "$STUB_EXEC_ERR" >&2
-    [[ ${STUB_EXEC_RC:-0} != 0 ]] || echo fedcba9876543210fedcba9876543210
-    exit "${STUB_EXEC_RC:-0}" ;;
-  rm)    rm -f -- "$c/$last" "$m/$last" "$l/$last"; printf '%s\n' "$last"; exit 0 ;;
+    args=("$@")
+    case $* in
+      *' hc serve')
+        # the container is the word before hc serve
+        ctr=${args[${#args[@]}-3]}
+        [[ -z ${STUB_EXEC_ERR-} ]] || printf '%s\n' "$STUB_EXEC_ERR" >&2
+        [[ ${STUB_EXEC_RC:-0} == 0 ]] || exit "$STUB_EXEC_RC"
+        : >"$s/cores/$ctr"
+        echo fedcba9876543210fedcba9876543210
+        exit 0 ;;
+      *'command -v hc'*)
+        [[ ! -e $s/nohc/$2 ]]
+        exit ;;
+      *sha256sum*)
+        # pm ps --agents: one line per file after `sh`: its hash, or -
+        [[ ! -e $s/nosha/$2 ]] || exit 3
+        for (( i = 0; i < ${#args[@]}; i++ )); do [[ ${args[i]} != sh ]] || j=$i; done
+        for f in "${args[@]:j+1}"; do
+          if [[ -f $s/fs/$2$f ]]; then sha256sum <"$s/fs/$2$f"; else echo -; fi
+        done
+        exit 0 ;;
+      *' mkdir -p '*) mkdir -p -- "$s/fs/$2$last"; exit 0 ;;
+    esac
+    exit 0 ;;
+  cp)
+    # podman cp -- <source> <container>:<path>, into the fake file system
+    [[ ${STUB_CP_RC:-0} == 0 ]] || { echo 'Error: stub: podman cp failed' >&2; exit "$STUB_CP_RC"; }
+    src=${*: -2:1} ctr=${last%%:*} path=${last#*:}
+    mkdir -p -- "$s/fs/$ctr${path%/*}"
+    cp -- "$src" "$s/fs/$ctr$path"
+    exit 0 ;;
+  rm)
+    for d in containers status mounts labels pmscript create cores nohc nosha; do rm -f -- "$s/$d/$last"; done
+    printf '%s\n' "$last"
+    exit 0 ;;
   ps)
-    # -q: the IDs of all fake containers; else the configured names
     if [[ " $* " == *' -q '* ]]; then
-      for f in "$c"/*; do [[ -e $f ]] && printf '%s\n' "${f##*/}"; done
+      # IDs: all with -a, else the running ones
+      for f in "$c"/*; do
+        [[ -e $f ]] || continue
+        [[ " $* " == *' -a '* || $(status "${f##*/}") == running ]] && printf '%s\n' "${f##*/}"
+      done
+    elif [[ $* == *label=pm-hc* ]]; then
+      # completion: the names with the pm-hc label, running ones unless --all
+      for f in "$s"/labels/*; do
+        [[ -e $f ]] || continue
+        [[ " $* " == *' --all '* || $(status "${f##*/}") == running ]] && printf '%s\n' "${f##*/}"
+      done
     else
       [[ -z ${STUB_PS-} ]] || printf '%s\n' "$STUB_PS"
     fi

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # pm – podman helper commands for dev containers, with bash and zsh completion.
-# Requires podman 6.0 or later and bash 5.2 or later; runs as a command.
+# Runs as a command; `pm doctor` checks the tools it needs.
 # `pm help` lists the subcommands and `pm readme` shows a quick start.
 # Install it on PATH as `pm.sh` and add `alias pm=pm.sh`; the completion binds
 # to both names.
@@ -327,18 +327,26 @@ _pm_hc_serve() {
 # add container $1 to hc on this host as the machine of the same name,
 # through podman exec, with no stdin and without --install, so hc never
 # asks and never copies itself into the container; a machine of that name
-# stays when it has pm's connection, else pm stops with an error
+# stays when it has pm's connection, else pm stops with an error; $2 is
+# the command for the notes: pm run, which also hints at pm hc-add, or
+# pm hc-add
 _pm_hc_add() {
-  local c=$1 via out rc=0
+  local c=$1 cmd=$2 via out rc=0 hint=''
+  [[ $cmd != 'pm run' ]] || hint="$cmd: add it later with: pm hc-add $c"
   if ! command -v hc >/dev/null 2>&1; then
-    printf 'pm run: note: no hc on PATH, so %s is not added as an hc machine\n' "$c" >&2
+    printf '%s: note: no hc on PATH, so %s is not added as an hc machine%s\n' \
+      "$cmd" "$c" "${hint:+; add it later with: pm hc-add $c}" >&2
     return 0
   fi
   via=$(_pm_hc_via "$c") || { _pm_err "$c: no absolute path to podman for hc"; return 1; }
-  out=$(hc machine ls --json 2>&1) || { _pm_err "$c: hc machine ls: $out"; return 1; }
+  if ! out=$(hc machine ls --json 2>&1); then
+    _pm_err "$c: hc machine ls: $out"
+    [[ -z $hint ]] || printf '%s\n' "$hint" >&2
+    return 1
+  fi
   _pm_hc_entry "$out" "$c" "$via" || rc=$?
   if (( rc == 0 )); then
-    printf 'pm run: note: hc machine %s already connects to this container; kept\n' "$c" >&2
+    printf '%s: note: hc machine %s already connects to this container; kept\n' "$cmd" "$c" >&2
     return 0
   elif (( rc == 1 )); then
     _pm_err "$c: hc already has a machine $c with another connection; see hc machine ls"
@@ -348,21 +356,32 @@ _pm_hc_add() {
     _pm_ok "hc machine $c added"
   else
     _pm_err "$c: hc machine add: $out"
+    [[ -z $hint ]] || printf '%s\n' "$hint" >&2
     return 1
   fi
 }
 
-# pm rm: forget hc machine $1, named after its container, while it still
-# has pm's connection to that container; skip lines otherwise
+# forget hc machine $1, named after its container, while it still has
+# pm's connection to that container; pm rm passes over a missing hc or
+# another connection with a skip line, pm hc-rm ($2 = 1) stops with an
+# error there
 _pm_hc_rm() {
-  local m=$1 via out rc=0
+  local m=$1 strict=${2:-0} via out rc=0
   if ! command -v hc >/dev/null 2>&1; then
+    if (( strict )); then
+      _pm_err "no hc on PATH; install it on this host to remove the hc machine $m"
+      return 1
+    fi
     _pm_skip "hc machine $m: no hc on PATH"
     return 0
   fi
   via=$(_pm_hc_via "$m") || { _pm_err "hc machine $m: no absolute path to podman"; return 1; }
   out=$(hc machine ls --json 2>&1) || { _pm_err "hc machine $m: $out"; return 1; }
   _pm_hc_entry "$out" "$m" "$via" || rc=$?
+  if (( rc == 1 && strict )); then
+    _pm_err "hc machine $m has another connection; remove it by hand with: hc machine rm $m"
+    return 1
+  fi
   case $rc in
     1) _pm_skip "hc machine $m: another connection; kept"; return 0 ;;
     2) _pm_skip "hc machine $m: not in hc machine ls"; return 0 ;;
@@ -399,8 +418,11 @@ pm_run() {
   local cc=0 cp=0 hc=0 mnt='' net='' image='' name='' npos=0 endflags=0
   local help="usage: pm run [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]
 
-  --cc              pass the Claude Code token as a podman secret
-  --cp              pass the GitHub Copilot token as a podman secret
+  --cc              pass the Claude Code token (pm secret-cc) as a podman
+                    secret, and copy CLAUDE.md and settings as pm cp-claude
+  --cp              pass the GitHub Copilot token (pm secret-cp) as a podman
+                    secret, and copy the instructions and settings as
+                    pm cp-copilot
   --hc              give the container a stable herdr-core identity, start
                     the core in it, and add it to hc here as a machine;
                     needs --mount, see herdr-core
@@ -461,6 +483,8 @@ runs: podman network create -o isolate=strict --label pm-script=$PM_VERSION <net
       podman run -d --init --userns=keep-id --label pm-script=$PM_VERSION
       [--label pm-hc=<container-name>] [--network <network>] [-v ...]
       [--secret ...] --name <container-name> <image> sleep infinity
+      with --cc: as pm cp-claude, CLAUDE.md and settings into ~/.claude
+      with --cp: as pm cp-copilot, instructions and settings into ~/.copilot
       with --hc: podman exec -d -e SHELL=/bin/bash <container-name> hc serve
       hc machine add --name <container-name>
         --via '<podman> exec -i <container-name> sh -c'
@@ -565,6 +589,15 @@ then: pm bash <container-name>"
     _pm_err "container $name exists; remove it with: pm rm $name"
     return 1
   fi
+  # the token secrets must exist before pm creates anything
+  if (( cc )) && ! podman secret exists "$PM_CC_SECRET" 2>/dev/null; then
+    _pm_err "podman secret $PM_CC_SECRET is missing; store the token first with: pm secret-cc"
+    return 1
+  fi
+  if (( cp )) && ! podman secret exists "$PM_CP_SECRET" 2>/dev/null; then
+    _pm_err "podman secret $PM_CP_SECRET is missing; store the token first with: pm secret-cp"
+    return 1
+  fi
 
   # one container per folder, for a consistent network, identity, and
   # state: stop when a podman container mounts the folder or, with --hc,
@@ -639,12 +672,17 @@ then: pm bash <container-name>"
   fi
   trap - INT
 
-  # herdr-core: the core, then the hc machine on this host; on failure the
-  # container stays, as it runs fine without them
+  # the agent files as pm cp-claude and pm cp-copilot copy them, then the
+  # herdr-core core and the hc machine on this host; a failed copy still
+  # lets the later steps run, and the container stays on any failure
+  local rc=0
+  if (( cc )); then _pm_put_claude "$name" || rc=1; fi
+  if (( cp )); then _pm_put_copilot "$name" || rc=1; fi
   if (( hc )); then
     _pm_hc_serve "$name" || return 1
-    _pm_hc_add "$name" || return 1
+    _pm_hc_add "$name" 'pm run' || rc=1
   fi
+  return $rc
 }
 
 # undo a failed pm run: the container it left in created state, then the
@@ -842,13 +880,201 @@ lists all networks with the containers attached to each
   done
 }
 
+# ------------------------------------------------------------------ pm hc-add / hc-rm
+
+# the pm-hc label of container $1 (pm run --hc set it; empty without), and
+# with $2 = 1 also its state after a unit separator; errors as red lines
+_pm_hc_label() {
+  local fmt='{{index .Config.Labels "pm-hc"}}' out
+  (( ${2:-0} )) && fmt+=$'\x1f''{{.State.Status}}'
+  if ! out=$(podman container inspect --format "$fmt" -- "$1" 2>/dev/null); then
+    out=$(podman container inspect -- "$1" 2>&1 >/dev/null)
+    _pm_err "container $1: $out"
+    return 1
+  fi
+  if [[ -z ${out%%$'\x1f'*} ]]; then
+    _pm_err "$1 has no pm-hc label; only pm run --hc sets it, when it creates a container"
+    return 1
+  fi
+  printf '%s\n' "$out"
+}
+
+pm_hc_add() {
+  local help="usage: pm hc-add <container>
+
+adds a container made with pm run --hc to hc on this host as the hc machine
+named in its label pm-hc, as pm run --hc does: it starts hc serve first (a
+running core makes it exit at once), then runs hc machine add; it keeps a
+machine of that name with pm's connection and stops with an error for one
+with another
+
+  <container>  running container with the label pm-hc; completion lists
+               those
+
+runs: podman exec -d -e SHELL=/bin/bash <container> hc serve
+      hc machine add --name <name> --via '<podman> exec -i <name> sh -c'
+needs: hc on PATH"
+  local out m state
+  _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
+  if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
+  out=$(_pm_hc_label "$1" 1) || return 1
+  IFS=$'\x1f' read -r m state <<<"$out"
+  if [[ $state != running ]]; then
+    _pm_err "container $1 is $state; start it with: pm start $1"
+    return 1
+  fi
+  if ! command -v hc >/dev/null 2>&1; then
+    _pm_err "no hc on PATH; install it on this host to add $m as an hc machine"
+    return 1
+  fi
+  _pm_hc_serve "$1" || return 1
+  _pm_hc_add "$m" 'pm hc-add'
+}
+
+pm_hc_rm() {
+  local help="usage: pm hc-rm <container>
+
+removes the hc machine of a container made with pm run --hc from hc on this
+host, as pm rm does; the container stays, running or not
+
+  <container>  container with the label pm-hc; completion lists those
+
+a machine that is gone gives a skip line; one with another connection is an
+error, as pm removes only its own
+
+runs: hc machine rm <name>
+needs: hc on PATH"
+  local m
+  _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
+  if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
+  m=$(_pm_hc_label "$1") || return 1
+  _pm_hc_rm "$m" 1
+}
+
+# ------------------------------------------------------------------ pm doctor
+
+# one doctor line, ok when $1 is 0, else failed, with the text $2; color
+# only on a terminal and without NO_COLOR, as in _pm_ok and _pm_err
+_pm_check() {
+  local word=ok color=32
+  (( $1 == 0 )) || word=failed color=31
+  if [[ -t 1 && -z ${NO_COLOR-} ]]; then
+    printf '\033[%sm%-6s\033[0m %s\n' "$color" "$word" "$2"
+  else
+    printf '%-6s %s\n' "$word" "$2"
+  fi
+  return "$1"
+}
+
+# true when version $1 is $2 or later, compared number by number (5.10
+# is later than 5.9); a missing part counts as 0
+_pm_version_ge() {
+  local -a a b
+  local i x y
+  IFS=. read -r -a a <<<"$1"
+  IFS=. read -r -a b <<<"$2"
+  for (( i = 0; i < ${#a[@]} || i < ${#b[@]}; i++ )); do
+    x=$(( 10#${a[i]:-0} )) y=$(( 10#${b[i]:-0} ))
+    (( x == y )) || return $(( x < y ))
+  done
+  return 0
+}
+
+# the first version number in the first line of `$1 --version`
+_pm_tool_version() {
+  local line re='[0123456789]+(\.[0123456789]+)*'
+  IFS= read -r line < <("$1" --version 2>/dev/null)
+  if [[ $line =~ $re ]]; then printf '%s\n' "${BASH_REMATCH[0]}"; fi
+}
+
+# tool $1 on PATH at version $2 or later; for bash, the one on PATH, which
+# runs pm.sh through #!/usr/bin/env bash
+_pm_doctor_version() {
+  local v
+  if ! command -v "$1" >/dev/null 2>&1; then
+    _pm_check 1 "$1 not found (needs $2 or later)"
+    return
+  fi
+  v=$(_pm_tool_version "$1")
+  _pm_version_ge "$v" "$2"
+  _pm_check $? "$1 ${v:-of unknown version} (needs $2 or later)"
+}
+
+# a sha256 tool for pm's hashes, as _pm_sha256 looks for one
+_pm_doctor_sha256() {
+  local t
+  for t in sha256sum shasum openssl; do
+    if command -v "$t" >/dev/null 2>&1; then _pm_check 0 "sha256 tool: $t"; return; fi
+  done
+  _pm_check 1 'sha256 tool: none of sha256sum, shasum, openssl'
+}
+
+# a uuid source for new machine ids: uuidgen, else the kernel's uuid file
+# $1 where the system has one (macOS has no /proc)
+_pm_doctor_uuid() {
+  if command -v uuidgen >/dev/null 2>&1; then _pm_check 0 'uuid source: uuidgen'
+  elif [[ -r $1 ]]; then _pm_check 0 "uuid source: $1"
+  else _pm_check 1 "uuid source: neither uuidgen nor $1"; fi
+}
+
+_pm_doctor_git() {
+  if command -v git >/dev/null 2>&1; then _pm_check 0 "git $(_pm_tool_version git)"
+  else _pm_check 1 'git not found'; fi
+}
+
+# the host's hc core, found among this user's processes, as hc server
+# status would start one; on Linux, a process in another pid namespace is
+# the core of a container, whose processes the host lists as well
+_pm_doctor_core() {
+  local pid args own re='(^|/)(hc|herdr-core) serve( |$)'
+  own=$(readlink "/proc/$$/ns/pid" 2>/dev/null)
+  while read -r pid args; do
+    [[ $args =~ $re ]] || continue
+    if [[ -z $own || $(readlink "/proc/$pid/ns/pid" 2>/dev/null) == "$own" ]]; then
+      _pm_check 0 'hc core running'
+      return
+    fi
+  done < <(ps -U "$(id -u)" -o pid= -o args= 2>/dev/null)
+  _pm_check 1 'hc core not running (starts on first hc use)'
+}
+
+pm_doctor() {
+  local help='usage: pm doctor
+
+checks the tools pm uses on this host, one line each: ok or failed, with
+the version found and the version needed
+
+required, exit 1 when one fails:
+  bash 5.3 or later (the bash on PATH, which runs pm.sh), podman 6.2 or
+  later, jq 1.8 or later, a sha256 tool (sha256sum, shasum, or openssl),
+  and uuidgen or /proc/sys/kernel/random/uuid
+optional, shown only:
+  zsh 5.9 or later, hc 0.1.21 or later, git, and the hc core on this host,
+  found by its process: pm doctor never starts one'
+  local rc=0
+  _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
+  (( $# == 0 )) || { _pm_usage "$help"; return 2; }
+  printf '%s\n' required
+  _pm_doctor_version bash 5.3 || rc=1
+  _pm_doctor_version podman 6.2 || rc=1
+  _pm_doctor_version jq 1.8 || rc=1
+  _pm_doctor_sha256 || rc=1
+  _pm_doctor_uuid /proc/sys/kernel/random/uuid || rc=1
+  printf '%s\n' optional
+  _pm_doctor_version zsh 5.9 || :
+  _pm_doctor_version hc 0.1.21 || :
+  _pm_doctor_git || :
+  _pm_doctor_core || :
+  return $rc
+}
+
 # ------------------------------------------------------------------ pm ps
 
 # table of containers; $1 = 1 for all, 0 for running only
 _pm_ps_table() {
-  local all=$1 ids fmt sep=$'\x1f' id name status pm folder mounts project
-  local m w=4 pw=2 i n
-  local -a ms r_id r_name r_status r_pm r_project
+  local all=$1 ids fmt sep=$'\x1f' id name status pm folder mounts nets mode hcl
+  local project m w=4 pw=2 nw=7 i n row hf=''
+  local -a ms r_id r_name r_status r_pm r_net r_hc r_project r_cont r_host
   if (( all )); then ids=$(podman ps -a -q) || return 1
   else ids=$(podman ps -q) || return 1; fi
 
@@ -858,9 +1084,11 @@ _pm_ps_table() {
     fmt="{{printf \"%.12s\" .ID}}$sep{{.Name}}$sep{{.State.Status}}$sep"
     fmt+="{{index .Config.Labels \"pm-script\"}}$sep"
     fmt+="{{index .Config.Labels \"devcontainer.local_folder\"}}$sep"
-    fmt+='{{range .Mounts}}{{.Destination}}={{.Source}};{{end}}'
+    fmt+="{{range .Mounts}}{{.Destination}}={{.Source}};{{end}}$sep"
+    fmt+="{{range \$k, \$v := .NetworkSettings.Networks}}{{\$k}},{{end}}$sep"
+    fmt+="{{.HostConfig.NetworkMode}}$sep{{index .Config.Labels \"pm-hc\"}}"
     # shellcheck disable=SC2086  # ids is a newline-separated list
-    while IFS=$sep read -r id name status pm folder mounts; do
+    while IFS=$sep read -r id name status pm folder mounts nets mode hcl; do
       # project: devcontainer label, else the host folder mounted at
       # /workspaces/<name>, ignoring the worktrees mount
       project=$folder
@@ -873,17 +1101,126 @@ _pm_ps_table() {
           fi
         done
       fi
+      # networks by name, else the network mode in parentheses, as pm net
+      nets=${nets%,}
+      [[ -n $nets ]] || nets="($mode)"
       n=${#r_id[@]}
-      r_id[n]=$id r_name[n]=$name r_status[n]=$status r_pm[n]=$pm r_project[n]=$project
+      r_id[n]=$id r_name[n]=$name r_status[n]=$status r_pm[n]=${pm:+v$pm}
+      r_net[n]=$nets r_hc[n]=$hcl r_project[n]=$project
       (( ${#name} > w )) && w=${#name}
-      (( ${#pm} > pw )) && pw=${#pm}
+      (( ${#r_pm[n]} > pw )) && pw=${#r_pm[n]}
+      (( ${#nets} > nw )) && nw=${#nets}
     done < <(podman container inspect --format "$fmt" $ids)
   fi
 
-  printf "%-12s  %-${w}s  %-10s  %-${pw}s  %s\n" 'CONTAINER ID' NAME STATUS PM PROJECT
+  # EXPERIMENTAL: the CONT-HERDR and HOST-HERDR columns; comment out the
+  # next two lines to drop them, if they turn out too slow
+  _pm_ps_herdr
+  hf='%-11s  %-11s  '
+
+  row="%-12s  %-${w}s  %-10s  %-${pw}s  %-${nw}s  $hf%s\n"
+  # shellcheck disable=SC2059  # the format holds column widths
+  printf "$row" 'CONTAINER ID' NAME STATUS PM NETWORK ${hf:+CONT-HERDR HOST-HERDR} PROJECT
   for (( i = 0; i < ${#r_id[@]}; i++ )); do
-    printf "%-12s  %-${w}s  %-10s  %-${pw}s  %s\n" \
-      "${r_id[i]}" "${r_name[i]}" "${r_status[i]}" "${r_pm[i]}" "${r_project[i]}"
+    # shellcheck disable=SC2059  # the format holds column widths
+    printf "$row" "${r_id[i]}" "${r_name[i]}" "${r_status[i]}" "${r_pm[i]}" "${r_net[i]}" \
+      ${hf:+"${r_cont[i]}" "${r_host[i]}"} "${r_project[i]}"
+  done
+}
+
+# EXPERIMENTAL: CONT-HERDR and HOST-HERDR for the rows of _pm_ps_table,
+# filled into its r_cont and r_host (bash's dynamic scope); costs podman
+# top, and without a core a podman exec, per running container, and one
+# hc machine ls, which may start the host's hc core
+_pm_ps_herdr() {
+  local i m via ls='' hc=0 top re='(^|[[:space:]/])(hc|herdr-core) serve([[:space:]]|$)'
+  if command -v hc >/dev/null 2>&1; then hc=1; ls=$(hc machine ls --json 2>/dev/null); fi
+  for (( i = 0; i < ${#r_id[@]}; i++ )); do
+    # in the container: a running core, else hc there or not
+    if [[ ${r_status[i]} != running ]]; then r_cont[i]=stopped
+    elif top=$(podman top "${r_id[i]}" args 2>/dev/null) && [[ $top =~ $re ]]; then r_cont[i]=running
+    elif podman exec "${r_id[i]}" sh -c 'command -v hc || command -v herdr-core' \
+      >/dev/null 2>&1 </dev/null; then r_cont[i]=stopped
+    else r_cont[i]=unavailable; fi
+    # on the host: the machine pm adds for it, named by the pm-hc label
+    if (( ! hc )); then r_host[i]=unavailable; continue; fi
+    m=${r_hc[i]:-${r_name[i]}}
+    if via=$(_pm_hc_via "$m") && _pm_hc_entry "$ls" "$m" "$via"; then r_host[i]=yes
+    else r_host[i]=no; fi
+  done
+}
+
+# the sha256 of file $1, or nothing when it is missing or cannot be hashed
+_pm_file_sha256() {
+  [[ -f $1 && -r $1 ]] || return 0
+  _pm_sha256 <"$1" 2>/dev/null
+}
+
+# identical, differ, or n/a (a side has no file): host hash $1 against the
+# container's $2 (- for none)
+_pm_same() {
+  if [[ -z $1 || -z $2 || $2 == - ]]; then echo n/a
+  elif [[ $1 == "$2" ]]; then echo identical
+  else echo differ; fi
+}
+
+# table of the agent tokens and files; $1 = 1 for all, 0 for running only
+_pm_ps_agents() {
+  local all=$1 ids fmt sep=$'\x1f' rs=$'\x1e' id name status cmd secrets
+  local names prev a hmd hcs hps w=4 cw=9 i n row sum
+  local -a args sums r_id r_name r_status r_scc r_scp r_ccc r_ccp
+  if (( all )); then ids=$(podman ps -a -q) || return 1
+  else ids=$(podman ps -q) || return 1; fi
+
+  if [[ -n $ids ]]; then
+    # podman inspect shows env secrets only in the command that created
+    # the container (their values are masked), mount secrets by name
+    fmt="{{printf \"%.12s\" .ID}}$sep{{.Name}}$sep{{.State.Status}}$sep"
+    fmt+="{{range .Config.CreateCommand}}{{.}}$rs{{end}}$sep"
+    fmt+="{{range .Config.Secrets}}{{.Name}}$rs{{end}}"
+    # shellcheck disable=SC2086  # ids is a newline-separated list
+    while IFS=$sep read -r id name status cmd secrets; do
+      names=$rs$secrets prev=''
+      IFS=$rs read -r -a args <<<"$cmd"
+      for a in "${args[@]}"; do
+        if [[ $prev == --secret ]]; then names+=${a%%,*}$rs
+        elif [[ $a == --secret=* ]]; then a=${a#--secret=}; names+=${a%%,*}$rs; fi
+        prev=$a
+      done
+      n=${#r_id[@]}
+      r_id[n]=$id r_name[n]=$name r_status[n]=$status r_scc[n]=no r_scp[n]=no
+      [[ $names != *"$rs$PM_CC_SECRET$rs"* ]] || r_scc[n]=yes
+      [[ $names != *"$rs$PM_CP_SECRET$rs"* ]] || r_scp[n]=yes
+      (( ${#name} > w )) && w=${#name}
+    done < <(podman container inspect --format "$fmt" $ids)
+  fi
+
+  # the host files once; per running container one podman exec hashes the
+  # four files there with its sha256sum (none: n/a)
+  hmd=$(_pm_file_sha256 "$PM_CLAUDE_MD")
+  hcs=$(_pm_file_sha256 "$PM_CLAUDE_SETTINGS")
+  hps=$(_pm_file_sha256 "$PM_COPILOT_SETTINGS")
+  for (( i = 0; i < ${#r_id[@]}; i++ )); do
+    if [[ ${r_status[i]} != running ]]; then r_ccc[i]=stopped r_ccp[i]=stopped; continue; fi
+    sums=()
+    while read -r sum _; do sums+=("$sum"); done < <(podman exec "${r_id[i]}" sh -c \
+      'command -v sha256sum >/dev/null || exit 3
+       for f; do if [ -f "$f" ]; then sha256sum <"$f"; else echo -; fi; done' sh \
+      /home/vscode/.claude/CLAUDE.md /home/vscode/.claude/settings.json \
+      /home/vscode/.copilot/copilot-instructions.md /home/vscode/.copilot/settings.json \
+      2>/dev/null </dev/null)
+    r_ccc[i]=$(_pm_same "$hmd" "${sums[0]-}"),$(_pm_same "$hcs" "${sums[1]-}")
+    r_ccp[i]=$(_pm_same "$hmd" "${sums[2]-}"),$(_pm_same "$hps" "${sums[3]-}")
+    (( ${#r_ccc[i]} > cw )) && cw=${#r_ccc[i]}
+  done
+
+  row="%-12s  %-${w}s  %-10s  %-9s  %-${cw}s  %-9s  %s\n"
+  # shellcheck disable=SC2059  # the format holds column widths
+  printf "$row" 'CONTAINER ID' NAME STATUS SECRET-CC CONFIG-CC SECRET-CP CONFIG-CP
+  for (( i = 0; i < ${#r_id[@]}; i++ )); do
+    # shellcheck disable=SC2059  # the format holds column widths
+    printf "$row" "${r_id[i]}" "${r_name[i]}" "${r_status[i]}" "${r_scc[i]}" \
+      "${r_ccc[i]}" "${r_scp[i]}" "${r_ccp[i]}"
   done
 }
 
@@ -898,12 +1235,14 @@ _pm_inspect_json() {
 }
 
 pm_ps() {
-  local help='usage: pm ps [-a | --all]
+  local help='usage: pm ps [-a | --all] [--agents]
        pm ps <container>
        pm ps labels | mounts | ns | id [<container>]
 
   (none)       table of running containers
   -a, --all    the same table for all containers
+  --agents     a table of the agent tokens and files instead; with -a, of
+               all containers
   <container>  full podman inspect JSON of one container
   labels       labels; devcontainer.metadata is parsed into JSON
   mounts       mounts: type, source, destination, rw
@@ -913,22 +1252,48 @@ pm_ps() {
 without <container>, labels, mounts, ns, and id cover all containers
 
 table columns:
-  PM       value of the pm-script label: the pm version that created it
-  PROJECT  label devcontainer.local_folder, else the host folder mounted
-           at /workspaces/<foldername>
+  PM          v and the pm-script label: the pm version that created it
+  NETWORK     its networks, else its network mode in parentheses
+  CONT-HERDR  experimental: running when hc serve runs in the container,
+              stopped when it has hc but no core or does not run,
+              unavailable when it runs without hc
+  HOST-HERDR  experimental: yes when hc on this host has the machine that
+              pm adds for it, no when not, unavailable without hc here;
+              hc machine ls may start the core on this host
+  PROJECT     label devcontainer.local_folder, else the host folder mounted
+              at /workspaces/<foldername>
 
-needs: jq for every view except the table
+--agents columns:
+  SECRET-CC   yes when the container has the podman secret PM_CC_SECRET,
+              from podman inspect, so stopped containers show it too
+  SECRET-CP   the same for PM_CP_SECRET
+  CONFIG-CC   two states: ~/.claude/CLAUDE.md against PM_CLAUDE_MD, and
+              ~/.claude/settings.json against PM_CLAUDE_SETTINGS
+  CONFIG-CP   ~/.copilot/copilot-instructions.md against PM_CLAUDE_MD, and
+              ~/.copilot/settings.json against PM_COPILOT_SETTINGS
+  each state is identical, differ, or n/a (a file is missing on a side),
+  or stopped when the container does not run
+
+needs: jq for every view except the tables
 note: a container named labels, mounts, ns, or id cannot be shown with
       pm ps <container>'
-  local view c json
+  local view c json a all=0 agents=0
 
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
-  case ${1-} in
-    '')        (( $# == 0 )) || { _pm_usage "$help"; return 2; }
-               _pm_ps_table 0; return ;;
-    -a|--all)  (( $# == 1 )) || { _pm_usage "$help"; return 2; }
-               _pm_ps_table 1; return ;;
-    -*)        _pm_usage "pm ps: unknown option $1"$'\n\n'"$help"; return 2 ;;
+  # the tables: -a and --agents in either order, nothing else
+  if [[ -z ${1-} || ${1-} == -* ]]; then
+    for a; do
+      case $a in
+        -a|--all) all=1 ;;
+        --agents) agents=1 ;;
+        -*)       _pm_usage "pm ps: unknown option $a"$'\n\n'"$help"; return 2 ;;
+        *)        _pm_usage "$help"; return 2 ;;
+      esac
+    done
+    if (( agents )); then _pm_ps_agents "$all"; else _pm_ps_table "$all"; fi
+    return
+  fi
+  case $1 in
     labels|mounts|ns|id)
                view=$1 c=${2-}
                [[ $# -le 2 && $c != -* ]] || { _pm_usage "$help"; return 2; } ;;
@@ -1001,6 +1366,19 @@ note: the parent directory of the destination must already exist'
 
 # ------------------------------------------------------ pm cp-claude / cp-copilot
 
+# the files of pm cp-claude and pm cp-copilot, also copied by pm run --cc
+# and --cp: CLAUDE.md is required, the settings template optional
+_pm_put_claude() {
+  _pm_put_files "$1" .claude \
+    "$PM_CLAUDE_MD" CLAUDE.md 1 \
+    "$PM_CLAUDE_SETTINGS" settings.json 0
+}
+_pm_put_copilot() {
+  _pm_put_files "$1" .copilot \
+    "$PM_CLAUDE_MD" copilot-instructions.md 1 \
+    "$PM_COPILOT_SETTINGS" settings.json 0
+}
+
 pm_cp_claude() {
   local help="usage: pm cp-claude <container>     (alias: pm cp-cc)
 
@@ -1016,9 +1394,7 @@ creates /home/vscode/.claude first with: podman exec <container> mkdir -p
 sources: PM_CLAUDE_MD and PM_CLAUDE_SETTINGS"
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
   if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
-  _pm_put_files "$1" .claude \
-    "$PM_CLAUDE_MD" CLAUDE.md 1 \
-    "$PM_CLAUDE_SETTINGS" settings.json 0
+  _pm_put_claude "$1"
 }
 
 pm_cp_copilot() {
@@ -1036,9 +1412,7 @@ creates /home/vscode/.copilot first with: podman exec <container> mkdir -p
 sources: PM_CLAUDE_MD and PM_COPILOT_SETTINGS"
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
   if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
-  _pm_put_files "$1" .copilot \
-    "$PM_CLAUDE_MD" copilot-instructions.md 1 \
-    "$PM_COPILOT_SETTINGS" settings.json 0
+  _pm_put_copilot "$1"
 }
 
 # ------------------------------------------------------ pm secret-cc / secret-cp
@@ -1174,7 +1548,7 @@ _pm_candidates() {
       _pm_reply=(-h --help --version)
     else
       _pm_reply=(run start stop bash rm ps net cp cp-claude cp-cc cp-copilot cp-cp
-        secret-cc secret-cp readme sh zsh sh-file zsh-file help)
+        secret-cc secret-cp hc-add hc-rm doctor readme sh zsh sh-file zsh-file help)
     fi
     return 0
   fi
@@ -1182,15 +1556,23 @@ _pm_candidates() {
   [[ $sub == run ]] && { _pm_candidates_run; return 0; }
 
   # flags of the other subcommands, offered for the first argument only;
-  # pm rm also takes --force after the container
+  # pm rm also takes --force after the container, and pm ps the other of
+  # its two table flags
   if [[ $cur == -* ]]; then
     if [[ $sub == rm ]] && (( arg == 2 )) && [[ ${_pm_words[2]} != -* ]]; then
       _pm_kind=words; _pm_reply=(--force); return 0
     fi
+    if [[ $sub == ps ]] && (( arg == 2 )); then
+      case ${_pm_words[2]} in
+        -a|--all) _pm_kind=words; _pm_reply=(--agents) ;;
+        --agents) _pm_kind=words; _pm_reply=(-a --all) ;;
+      esac
+      return 0
+    fi
     (( arg == 1 )) || return 0
     _pm_kind=words
     case $sub in
-      ps)               _pm_reply=(-a --all --help) ;;
+      ps)               _pm_reply=(-a --all --agents --help) ;;
       rm)               _pm_reply=(--force --help) ;;
       sh-file|zsh-file) _pm_reply=(--force --help) ;;
       *)                _pm_reply=(--help) ;;
@@ -1223,6 +1605,9 @@ _pm_candidates() {
     # these run mkdir in the container, so it must be running
     cp-claude|cp-cc|cp-copilot|cp-cp)
            (( arg == 1 )) && _pm_list_containers --filter status=running ;;
+    # containers made with pm run --hc; hc-add needs a running one
+    hc-add) (( arg == 1 )) && _pm_list_containers --filter status=running --filter label=pm-hc ;;
+    hc-rm) (( arg == 1 )) && _pm_list_containers --all --filter label=pm-hc ;;
     sh-file|zsh-file) (( arg == 1 )) && { _pm_kind=words; _pm_reply=(--force); } ;;
   esac
   return 0
@@ -1331,7 +1716,7 @@ _pm_candidates() {
       reply=( -h --help --version )
     else
       reply=( run start stop bash rm ps net cp cp-claude cp-cc cp-copilot cp-cp
-        secret-cc secret-cp readme sh zsh sh-file zsh-file help )
+        secret-cc secret-cp hc-add hc-rm doctor readme sh zsh sh-file zsh-file help )
     fi
     return 0
   fi
@@ -1339,15 +1724,23 @@ _pm_candidates() {
   [[ $sub == run ]] && { _pm_candidates_run; return 0; }
 
   # flags of the other subcommands, offered for the first argument only;
-  # pm rm also takes --force after the container
+  # pm rm also takes --force after the container, and pm ps the other of
+  # its two table flags
   if [[ $cur == -* ]]; then
     if [[ $sub == rm ]] && (( arg == 2 )) && [[ ${words[3]} != -* ]]; then
       REPLY=words; reply=( --force ); return 0
     fi
+    if [[ $sub == ps ]] && (( arg == 2 )); then
+      case ${words[3]} in
+        -a|--all) REPLY=words; reply=( --agents ) ;;
+        --agents) REPLY=words; reply=( -a --all ) ;;
+      esac
+      return 0
+    fi
     (( arg == 1 )) || return 0
     REPLY=words
     case $sub in
-      ps)               reply=( -a --all --help ) ;;
+      ps)               reply=( -a --all --agents --help ) ;;
       rm)               reply=( --force --help ) ;;
       sh-file|zsh-file) reply=( --force --help ) ;;
       *)                reply=( --help ) ;;
@@ -1380,6 +1773,9 @@ _pm_candidates() {
     # these run mkdir in the container, so it must be running
     cp-claude|cp-cc|cp-copilot|cp-cp)
            (( arg == 1 )) && _pm_list_containers --filter status=running ;;
+    # containers made with pm run --hc; hc-add needs a running one
+    hc-add) (( arg == 1 )) && _pm_list_containers --filter status=running --filter label=pm-hc ;;
+    hc-rm) (( arg == 1 )) && _pm_list_containers --all --filter label=pm-hc ;;
     sh-file|zsh-file) (( arg == 1 )) && { REPLY=words; reply=( --force ); } ;;
   esac
   return 0
@@ -1498,8 +1894,6 @@ pm_usage() {
   printf '%s\n' \
     "pm $PM_VERSION – podman helpers for dev containers" \
     '' \
-    'requires: podman 6.0 or later, bash 5.2 or later' \
-    '' \
     'usage: pm <subcommand> [<args>]' \
     '       pm <subcommand> --help' \
     '' \
@@ -1508,13 +1902,16 @@ pm_usage() {
     '  stop       <container>' \
     '  bash       <container>    interactive bash terminal in a running container' \
     '  rm         [--force] <container>  remove it, its pm network once unused, and its hc machine' \
-    '  ps         [-a] | <container> | labels|mounts|ns|id [<container>]' \
+    '  ps         [-a] [--agents] | <container> | labels|mounts|ns|id [<container>]' \
     '  net        networks and their containers' \
     '  cp         <container> <local-file> <dest-name>' \
     '  cp-claude  <container>    alias cp-cc; CLAUDE.md and settings' \
     '  cp-copilot <container>    alias cp-cp; instructions and settings' \
     '  secret-cc                 store the Claude Code token as a podman secret' \
     '  secret-cp                 store the GitHub Copilot token as a podman secret' \
+    '  hc-add     <container>    add a pm run --hc container to hc here as a machine' \
+    '  hc-rm      <container>    remove its hc machine; the container stays' \
+    '  doctor                    check the tools pm needs' \
     '  readme     quick start' \
     '  sh         print bash completion; load it with  eval "$(pm sh)"' \
     '  zsh        print zsh completion; load it with  eval "$(pm zsh)"' \
@@ -1546,8 +1943,7 @@ INSTALL
   eval "\$(pm zsh)"                          # zsh completion, in ~/.zshrc after compinit
 
   pm sh-file and pm zsh-file write the completion to a file instead.
-  requires: podman 6.0 or later, bash 5.2 or later; jq for the pm ps
-  detail views
+  Run pm doctor to check the tools pm needs, with their versions.
 
 STORE THE AGENT TOKENS (once, and again to rotate them)
 
@@ -1556,14 +1952,18 @@ STORE THE AGENT TOKENS (once, and again to rotate them)
 
   Any agent in the container can read these tokens from its environment,
   see pm secret-cc --help. Recreate a container to be sure it gets a new token.
+  With pm run --cc or --cp, pm passes the token to the new container and
+  copies the agent files there, as pm cp-claude and pm cp-copilot do; a
+  missing secret stops it before anything is created.
 
 QUICK START
 
   # create pm-myapp with ~/src/myapp at /workspaces/myapp, plus
-  # ~/src/myapp.worktrees at /workspaces/myapp.worktrees when it exists
+  # ~/src/myapp.worktrees at /workspaces/myapp.worktrees when it exists,
+  # and copy CLAUDE.md and the settings template into it
   pm run --cc --mount ~/src/myapp mcr.microsoft.com/devcontainers/base:bookworm
 
-  pm cp-cc pm-myapp   # copy CLAUDE.md and the settings template
+  pm cp-cc pm-myapp   # copy CLAUDE.md and the settings template again
   pm bash pm-myapp    # open an interactive bash terminal
   pm ps               # running containers; pm ps -a lists all
   pm stop pm-myapp
@@ -1632,7 +2032,9 @@ HERDR-CORE
   core again, and pm rm removes its hc machine. podman sets labels only
   when it creates a container, so a container made without --hc or by an
   older pm gets none of this; make it again with pm run --hc. Without hc on
-  PATH, pm adds no machine and says so.
+  PATH, pm adds no machine and says so. pm hc-add <container> adds the
+  machine later, for example once hc is installed, and pm hc-rm <container>
+  removes it and keeps the container.
 
   To start over, delete the id file and the state folder. The dev container
   and a pm container of one project share the identity and the state, so
@@ -1646,6 +2048,9 @@ HERDR-CORE
 
 INSPECT
 
+  pm ps                   running containers with their pm version,
+                          networks, and, experimental, herdr state
+  pm ps --agents          agent tokens and files; -a for all containers
   pm ps pm-myapp          full inspect JSON
   pm ps labels pm-myapp   labels; also mounts, ns, and id
   pm ps labels            labels of all containers
@@ -1680,6 +2085,9 @@ main() {
     cp-copilot|cp-cp)     pm_cp_copilot "$@" ;;
     secret-cc)            pm_secret secret-cc "$PM_CC_SECRET" "$PM_CC_TARGET" 'Claude Code' "$@" ;;
     secret-cp)            pm_secret secret-cp "$PM_CP_SECRET" "$PM_CP_TARGET" 'GitHub Copilot' "$@" ;;
+    hc-add)               pm_hc_add "$@" ;;
+    hc-rm)                pm_hc_rm "$@" ;;
+    doctor)               pm_doctor "$@" ;;
     readme)               pm_readme "$@" ;;
     sh|zsh)               pm_print "$cmd" "$@" ;;
     sh-file)              pm_write_file sh "$@" ;;

@@ -14,6 +14,9 @@
 # core of its own (state and socket below BATS_TEST_TMPDIR) that teardown
 # stops; the other tests run without hc on PATH
 
+# shellcheck disable=SC2030,SC2031
+# SC2030, SC2031: each bats test runs in its own subshell
+
 load test_helper
 
 # the image's hc, once per file, for the host side of the machine test
@@ -39,6 +42,7 @@ setup() {
   NET=$NAME
   HC=$HOME/.config/herdr-core/container
   HOST_HC=0
+  SECRETS=()
   mkdir -p -- "$DIR"
 }
 
@@ -46,6 +50,9 @@ teardown() {
   [[ -n ${NAME-} ]] || return 0
   # the isolated host core of the machine test
   if (( HOST_HC )); then hc server stop >/dev/null 2>&1 || true; fi
+  # the podman secrets a test made
+  local s
+  for s in "${SECRETS[@]}"; do podman secret rm -- "$s" >/dev/null 2>&1 || true; done
   podman rm -f -t 0 -- "$CTR" >/dev/null 2>&1 || true
   podman rm -f -t 0 -- "$CTR2" >/dev/null 2>&1 || true
   podman rm -f -t 0 -- "$CTR2-2" >/dev/null 2>&1 || true
@@ -285,4 +292,120 @@ hc_serve_shell() {
   is_id "$(<"$DIR/herdr-machine-id")"
   local -a states=("$HC/$NAME"-*)
   [[ -d ${states[0]} ]]
+}
+
+# real_row <name>: the line of the pm ps output in $output for container
+# <name>, whose ID is a real 12-digit one
+real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
+
+@test "pm hc-add and pm hc-rm with a real host hc; pm ps shows PM, NETWORK, and the herdr columns" {
+  # without hc on PATH, pm run points to pm hc-add
+  run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
+  expect_status 0
+  has_line "$stderr" "pm run: note: no hc on PATH, so $CTR is not added as an hc machine; add it later with: pm hc-add $CTR"
+  use_host_hc
+  run --separate-stderr pm hc-add "$CTR"
+  expect_status 0
+  has_line "$output" "ok    hc machine $CTR added"
+  [ "$(host_machine "$CTR")" = "$(command -v podman) exec -i $CTR sh -c True" ] \
+    || fail "machine: $(hc machine ls --json)"
+
+  run --separate-stderr pm ps
+  expect_status 0
+  local r
+  r=$(real_row "$CTR") || fail "no row for $CTR in: $output"
+  [ "$(ps_cell PM "$r")" = "v9" ]
+  [ "$(ps_cell NETWORK "$r")" = "$NET" ]
+  [ "$(ps_cell CONT-HERDR "$r")" = running ]
+  [ "$(ps_cell HOST-HERDR "$r")" = yes ]
+  [ "$(ps_cell PROJECT "$r")" = "$DIR" ]
+
+  # hc-rm drops the machine and keeps the container; a second hc-rm skips
+  run --separate-stderr pm hc-rm "$CTR"
+  expect_status 0
+  [ "$output" = "ok    hc machine $CTR removed" ] || fail "output: $output"
+  [ -z "$(host_machine "$CTR")" ]
+  podman container exists -- "$CTR"
+  run --separate-stderr pm hc-rm "$CTR"
+  expect_status 0
+  [ "$output" = "skip  hc machine $CTR: not in hc machine ls" ] || fail "output: $output"
+  run --separate-stderr pm ps
+  expect_status 0
+  [ "$(ps_cell HOST-HERDR "$(real_row "$CTR")")" = no ]
+
+  # a stopped container counts as stopped in CONT-HERDR
+  run --separate-stderr pm stop "$CTR"
+  expect_status 0
+  run --separate-stderr pm ps -a
+  expect_status 0
+  [ "$(ps_cell CONT-HERDR "$(real_row "$CTR")")" = stopped ]
+}
+
+@test "pm run --cc --cp copies the agent files; pm ps --agents compares them, with real secrets" {
+  local cc=pmt-cc-$$-$RANDOM cp=pmt-cp-$$-$RANDOM r
+  printf 'token' | podman secret create -- "$cc" - >/dev/null
+  SECRETS+=("$cc")
+  printf 'token' | podman secret create -- "$cp" - >/dev/null
+  SECRETS+=("$cp")
+  export PM_CC_SECRET=$cc PM_CP_SECRET=$cp
+  export PM_CLAUDE_MD=$BATS_TEST_TMPDIR/claude.md PM_CLAUDE_SETTINGS=$BATS_TEST_TMPDIR/claude.json \
+    PM_COPILOT_SETTINGS=$BATS_TEST_TMPDIR/copilot.json
+  printf 'rules\n' >"$PM_CLAUDE_MD"
+  printf '{"a":1}\n' >"$PM_CLAUDE_SETTINGS"
+  printf '{"b":2}\n' >"$PM_COPILOT_SETTINGS"
+
+  run --separate-stderr pm run --cc --cp --mount "$DIR" "$IMG"
+  expect_status 0
+  [ "$(podman exec "$CTR" cat /home/vscode/.claude/CLAUDE.md)" = rules ]
+  [ "$(podman exec "$CTR" cat /home/vscode/.copilot/copilot-instructions.md)" = rules ]
+  [ "$(podman exec "$CTR" cat /home/vscode/.copilot/settings.json)" = '{"b":2}' ]
+
+  run --separate-stderr pm ps --agents
+  expect_status 0
+  r=$(real_row "$CTR") || fail "no row for $CTR in: $output"
+  [ "$(ps_cell SECRET-CC "$r")" = yes ]
+  [ "$(ps_cell SECRET-CP "$r")" = yes ]
+  [ "$(ps_cell CONFIG-CC "$r")" = identical,identical ]
+  [ "$(ps_cell CONFIG-CP "$r")" = identical,identical ]
+
+  printf 'changed\n' >"$PM_CLAUDE_MD"
+  rm -- "$PM_COPILOT_SETTINGS"
+  run --separate-stderr pm ps --agents
+  expect_status 0
+  r=$(real_row "$CTR")
+  [ "$(ps_cell CONFIG-CC "$r")" = differ,identical ]
+  [ "$(ps_cell CONFIG-CP "$r")" = differ,n/a ]
+
+  run --separate-stderr pm stop "$CTR"
+  expect_status 0
+  run --separate-stderr pm ps --agents -a
+  expect_status 0
+  r=$(real_row "$CTR")
+  [ "$(ps_cell SECRET-CC "$r")" = yes ]
+  [ "$(ps_cell CONFIG-CC "$r")" = stopped ]
+}
+
+@test "pm doctor reports this host's tools, one line each" {
+  run --separate-stderr pm doctor
+  local line failed=0
+  for line in "${lines[@]}"; do
+    case $line in
+      required|optional) ;;
+      'ok     '*|'failed '*) ;;
+      *) fail "odd line: $line" ;;
+    esac
+  done
+  # exit 1 exactly when a required check failed
+  failed=$(sed -n '/^required$/,/^optional$/p' <<<"$output" | grep -c '^failed ' || true)
+  if (( failed )); then [ "$status" -eq 1 ]; else [ "$status" -eq 0 ]; fi
+  # this host: bash 5.2 and jq 1.7 are below the minimums, podman 6.2 meets it
+  if [[ $(bash --version) == *'version 5.2.'* ]]; then
+    grep -qE '^failed bash 5\.2\.[0-9]+ \(needs 5\.3 or later\)$' <<<"$output" || fail "bash line: $output"
+  fi
+  if [[ $(jq --version 2>/dev/null) == jq-1.7* ]]; then
+    grep -qE '^failed jq 1\.7(\.[0-9]+)? \(needs 1\.8 or later\)$' <<<"$output" || fail "jq line: $output"
+  fi
+  if [[ $(podman --version) == 'podman version 6.2.'* ]]; then
+    grep -qE '^ok     podman 6\.2\.[0-9]+ \(needs 6\.2 or later\)$' <<<"$output" || fail "podman line: $output"
+  fi
 }
