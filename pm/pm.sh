@@ -188,11 +188,31 @@ _pm_devcontainer_id() {
   printf '%s\n' "$out"
 }
 
+# true when $1 is a valid id: 32 lowercase hex digits
+_pm_hc_id_ok() { [[ ${#1} == 32 && $1 != *[!0123456789abcdef]* ]]; }
+
+# the herdr-core state folder of mount folder $1, found without writing:
+# per devcontainerId with a .devcontainer folder, else per id ($2, or a
+# valid id in the id file); prints nothing when no id is known yet;
+# $HOME/.config even with XDG_CONFIG_HOME set, as the dev container mounts
+# it from there
+_pm_hc_known_state() {
+  local abs=$1 id=${2-} f=$1/herdr-machine-id h
+  if [[ -d $abs/.devcontainer ]]; then
+    h=$(_pm_devcontainer_id "$abs") || return 1
+  else
+    if [[ -z $id && -f $f && -r $f ]]; then id=$(<"$f"); fi
+    _pm_hc_id_ok "$id" || return 0
+    h=$(printf '%s' "$id" | _pm_sha256) || return 1
+  fi
+  printf '%s\n' "$HOME/.config/herdr-core/container/${abs##*/}-$h"
+}
+
 # prepare the herdr-core identity of the mount folder $1 as the dev
 # container template's initializeCommand does: keep or write the id file,
 # then create the state folder; sets _pm_hc_file and _pm_hc_state
 _pm_hc_prepare() {
-  local abs=$1 rel f id='' old=0 new=0 h tmp rc=0
+  local abs=$1 rel f id='' old=0 new=0 tmp rc=0
   local cfg=$HOME/.config/herdr-core
   # the dev container keeps the id file in .devcontainer, else the root
   if [[ -d $abs/.devcontainer ]]; then rel=.devcontainer/herdr-machine-id
@@ -207,13 +227,13 @@ _pm_hc_prepare() {
     old=1
   fi
   # valid: 32 lowercase hex digits once $(<) dropped trailing newlines
-  if [[ ${#id} != 32 || $id == *[!0123456789abcdef]* ]]; then
+  if ! _pm_hc_id_ok "$id"; then
     # a new id as the template makes it: uuidgen, else the kernel's uuid,
     # without dashes and lowercased
     id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null) || id=''
     id=${id//-/}
     id=${id,,}
-    if [[ ${#id} != 32 || $id == *[!0123456789abcdef]* ]]; then
+    if ! _pm_hc_id_ok "$id"; then
       _pm_err 'cannot make a herdr-core machine-id with uuidgen or /proc/sys/kernel/random/uuid'
       return 1
     fi
@@ -240,11 +260,7 @@ _pm_hc_prepare() {
     fi
   fi
 
-  # state folder per devcontainerId, else per id; $HOME/.config even with
-  # XDG_CONFIG_HOME set, as the dev container mounts it from there
-  if [[ $rel == .devcontainer/* ]]; then h=$(_pm_devcontainer_id "$abs") || return 1
-  else h=$(printf '%s' "$id" | _pm_sha256) || return 1; fi
-  _pm_hc_state=$cfg/container/${abs##*/}-$h
+  _pm_hc_state=$(_pm_hc_known_state "$abs" "$id") || return 1
   [[ -d $_pm_hc_state ]] || new=1
   # mode 700 as the template sets it: the state holds terminal output, which
   # may contain secrets; `--` comes first, as BSD chmod stops parsing options
@@ -257,6 +273,124 @@ _pm_hc_prepare() {
     printf 'pm run: note: new herdr-core state folder: %s\n' "$_pm_hc_state" >&2
   fi
   _pm_hc_file=$f
+}
+
+# true when hc takes $1 as a machine name (its check_name): 1-32 of a-z
+# 0-9 - _ ., a letter or digit first, and not shaped like a terminal id,
+# that is t, a digit 1-9, then only id symbols (t7, t1b)
+_pm_hc_name_ok() {
+  local n=$1 lc=abcdefghijklmnopqrstuvwxyz0123456789
+  [[ ${#n} -le 32 && $n == ["$lc"]* && $n != *[^"$lc"_.-]* ]] || return 1
+  [[ $n != t[123456789]* || ${n:2} == *[^0123456789bcdfghjkmnpqrstvwxyz]* ]]
+}
+
+# the connection command for container $1 that pm gives hc machine add:
+# podman's absolute path, single-quoted for sh when it holds characters
+# other than letters, digits, and / . _ + -, then exec -i <container> sh -c
+_pm_hc_via() {
+  local p safe=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._+-
+  p=$(command -v podman) && [[ $p == /* ]] || return 1
+  [[ $p != *[^"$safe"]* ]] || p="'${p//\'/\'\\\'\'}'"
+  printf '%s exec -i %s sh -c\n' "$p" "$1"
+}
+
+# how hc's machine list $1 (hc machine ls --json: compact, flat objects,
+# no bare quote inside a string) knows machine $2: return 0 with the
+# connection command $3, 1 with another, 2 not at all
+_pm_hc_entry() {
+  local s=$1 obj n t LC_ALL=C re='\{("([^"\\]|\\.)*"|[^"{}])*\}'
+  n="\"name\":$(_pm_json_str "$2")" t="\"target\":$(_pm_json_str "$3")"
+  while [[ $s =~ $re ]]; do
+    obj=${BASH_REMATCH[0]}
+    s=${s#*"$obj"}
+    [[ $obj == *"$n"[,}]* ]] || continue
+    [[ $obj == *"$t"[,}]* && $obj == *'"via":true'[,}]* ]] && return 0
+    return 1
+  done
+  return 2
+}
+
+# start the core in container $1, with the same lines in pm run and pm
+# start: hc serve runs in the foreground, hence -d, and sleep infinity
+# stays the main process; podman sets no SHELL, and the core starts new
+# shells from its own, else /bin/sh; a running core makes it exit at once
+_pm_hc_serve() {
+  local out
+  if out=$(podman exec -d -e SHELL=/bin/bash -- "$1" hc serve 2>&1); then
+    _pm_ok "hc serve started in $1"
+  else
+    _pm_err "$1: hc serve: $out"
+    return 1
+  fi
+}
+
+# add container $1 to hc on this host as the machine of the same name,
+# through podman exec, with no stdin and without --install, so hc never
+# asks and never copies itself into the container; a machine of that name
+# stays when it has pm's connection, else pm stops with an error
+_pm_hc_add() {
+  local c=$1 via out rc=0
+  if ! command -v hc >/dev/null 2>&1; then
+    printf 'pm run: note: no hc on PATH, so %s is not added as an hc machine\n' "$c" >&2
+    return 0
+  fi
+  via=$(_pm_hc_via "$c") || { _pm_err "$c: no absolute path to podman for hc"; return 1; }
+  out=$(hc machine ls --json 2>&1) || { _pm_err "$c: hc machine ls: $out"; return 1; }
+  _pm_hc_entry "$out" "$c" "$via" || rc=$?
+  if (( rc == 0 )); then
+    printf 'pm run: note: hc machine %s already connects to this container; kept\n' "$c" >&2
+    return 0
+  elif (( rc == 1 )); then
+    _pm_err "$c: hc already has a machine $c with another connection; see hc machine ls"
+    return 1
+  fi
+  if out=$(hc machine add --name "$c" --via "$via" 2>&1 </dev/null); then
+    _pm_ok "hc machine $c added"
+  else
+    _pm_err "$c: hc machine add: $out"
+    return 1
+  fi
+}
+
+# pm rm: forget hc machine $1, named after its container, while it still
+# has pm's connection to that container; skip lines otherwise
+_pm_hc_rm() {
+  local m=$1 via out rc=0
+  if ! command -v hc >/dev/null 2>&1; then
+    _pm_skip "hc machine $m: no hc on PATH"
+    return 0
+  fi
+  via=$(_pm_hc_via "$m") || { _pm_err "hc machine $m: no absolute path to podman"; return 1; }
+  out=$(hc machine ls --json 2>&1) || { _pm_err "hc machine $m: $out"; return 1; }
+  _pm_hc_entry "$out" "$m" "$via" || rc=$?
+  case $rc in
+    1) _pm_skip "hc machine $m: another connection; kept"; return 0 ;;
+    2) _pm_skip "hc machine $m: not in hc machine ls"; return 0 ;;
+  esac
+  if out=$(hc machine rm "$m" 2>&1 </dev/null); then
+    _pm_ok "hc machine $m removed"
+  else
+    _pm_err "hc machine $m: $out"
+    return 1
+  fi
+}
+
+# names of the podman containers, in any state, that bind-mount one of
+# the host paths given (any target), from one inspect call for all of them
+_pm_mount_users() {
+  local ids name srcs src p us=$'\x1f' rs=$'\x1e'
+  local -a list
+  ids=$(podman ps -a -q 2>/dev/null) || return 1
+  [[ -n $ids ]] || return 0
+  # shellcheck disable=SC2086  # ids is a newline-separated list
+  while IFS=$us read -r name srcs; do
+    IFS=$rs read -r -a list <<<"$srcs"
+    for src in "${list[@]}"; do
+      for p; do
+        if [[ $src == "$p" ]]; then printf '%s\n' "$name"; continue 3; fi
+      done
+    done
+  done < <(podman container inspect --format "{{.Name}}$us{{range .Mounts}}{{.Source}}$rs{{end}}" $ids 2>/dev/null)
 }
 
 # ------------------------------------------------------------------ pm run

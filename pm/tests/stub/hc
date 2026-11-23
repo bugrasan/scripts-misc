@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# fake host hc for the pm stub tests: appends each call to $HC_LOG (one
+# line per call, every argument in printf %q form) and answers machine ls,
+# add, and rm; for machine add it also appends to $HC_LOG.stdin whether
+# stdin is /dev/null (devnull) or not (other)
+# settings, all optional:
+#   FAKE_HC_LS       what machine ls --json prints (default: no machines)
+#   FAKE_HC_LS_RC    its exit status (default 0)
+#   FAKE_HC_ADD_RC   exit status of machine add (default 0)
+#   FAKE_HC_ADD_OUT  what a failing machine add prints
+#   FAKE_HC_RM_RC    exit status of machine rm (default 0)
+#   FAKE_HC_RM_OUT   what a failing machine rm prints
+
+printf '%q ' "$@" >>"${HC_LOG:?}"
+printf '\n' >>"$HC_LOG"
+none='{"machines":[]}'
+
+case "${1-} ${2-}" in
+  'machine ls')
+    printf '%s\n' "${FAKE_HC_LS-$none}"
+    exit "${FAKE_HC_LS_RC:-0}" ;;
+  'machine add')
+    if [[ /proc/$$/fd/0 -ef /dev/null ]]; then echo devnull; else echo other; fi >>"$HC_LOG.stdin"
+    if [[ ${FAKE_HC_ADD_RC:-0} != 0 ]]; then
+      printf '%s\n' "${FAKE_HC_ADD_OUT-}"
+      exit "$FAKE_HC_ADD_RC"
+    fi
+    printf '{"name":"%s","target":"fake","via":true}\n' "${4-}"
+    exit 0 ;;
+  'machine rm')
+    if [[ ${FAKE_HC_RM_RC:-0} != 0 ]]; then
+      printf '%s\n' "${FAKE_HC_RM_OUT-}"
+      exit "$FAKE_HC_RM_RC"
+    fi
+    printf '{"removed":"%s"}\n' "${3-}"
+    exit 0 ;;
+esac
+exit 0

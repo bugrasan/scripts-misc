@@ -10,8 +10,21 @@
 # also creates $HOME/.config/herdr-core/container in the real HOME when it
 # is missing and sets $HOME/.config/herdr-core to mode 700, as it does for
 # every pm run --hc; the tests leave both in place
+# the hc machine test uses the image's own hc as the host's hc, with a host
+# core of its own (state and socket below BATS_TEST_TMPDIR) that teardown
+# stops; the other tests run without hc on PATH
 
 load test_helper
+
+# the image's hc, once per file, for the host side of the machine test
+setup_file() {
+  [[ ${PM_TEST_PODMAN-} == 1 ]] || return 0
+  local img=${PM_TEST_IMAGE:-ghcr.io/bugrasan/devcontainer-base-ai/base:latest} cid
+  mkdir -p -- "$BATS_FILE_TMPDIR/hcbin"
+  cid=$(podman create "$img" true) || return 0
+  podman cp "$cid:/usr/local/bin/hc" "$BATS_FILE_TMPDIR/hcbin/hc" >/dev/null 2>&1 || true
+  podman rm -- "$cid" >/dev/null 2>&1 || true
+}
 
 setup() {
   [[ ${PM_TEST_PODMAN-} == 1 ]] || skip 'set PM_TEST_PODMAN=1 to run with real rootless podman'
@@ -25,13 +38,17 @@ setup() {
   CTR2=$CTR-2
   NET=$NAME
   HC=$HOME/.config/herdr-core/container
+  HOST_HC=0
   mkdir -p -- "$DIR"
 }
 
 teardown() {
   [[ -n ${NAME-} ]] || return 0
+  # the isolated host core of the machine test
+  if (( HOST_HC )); then hc server stop >/dev/null 2>&1 || true; fi
   podman rm -f -t 0 -- "$CTR" >/dev/null 2>&1 || true
   podman rm -f -t 0 -- "$CTR2" >/dev/null 2>&1 || true
+  podman rm -f -t 0 -- "$CTR2-2" >/dev/null 2>&1 || true
   podman network rm -- "$NET" >/dev/null 2>&1 || true
   local d
   for d in "$HC/$NAME"-*; do
@@ -106,6 +123,27 @@ hc_serve_running() {
   done
   podman top "$1" args >&2 || true
   fail "no hc serve process in $1"
+}
+
+# use_host_hc: the image's hc as this host's hc, with a core of its own:
+# XDG_STATE_HOME and HC_SOCKET below BATS_TEST_TMPDIR; XDG_RUNTIME_DIR and
+# XDG_CONFIG_HOME stay, as podman, which the core runs for the machine
+# connection, reads them
+use_host_hc() {
+  [[ -x $BATS_FILE_TMPDIR/hcbin/hc ]] || fail 'could not take hc from the image'
+  export PATH=$BATS_FILE_TMPDIR/hcbin:$PATH
+  export XDG_STATE_HOME=$BATS_TEST_TMPDIR/hc-state HC_SOCKET=$BATS_TEST_TMPDIR/hc.sock
+  mkdir -p -- "$XDG_STATE_HOME"
+  HOST_HC=1
+}
+
+# host_machine <name>: "<target> <via>" of that machine in hc machine ls
+# --json, or nothing
+host_machine() {
+  hc machine ls --json | python3 -I -c 'import json, sys
+for m in json.load(sys.stdin)["machines"]:
+    if m["name"] == sys.argv[1]:
+        print(m["target"], m["via"])' "$1"
 }
 
 # hc_serve_shell <container>: SHELL in the environment of the running
@@ -192,15 +230,49 @@ hc_serve_shell() {
   [ "$mid" = "$id" ] || fail "machine_id $mid, id file $id"
 }
 
-@test "pm run --hc: a second container on the same folder gets a note about the first" {
+@test "pm run: no second container for the same folder; the podman run line it prints works" {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
-  local state
-  state=$HC/$NAME-$(sha256_hex "$(<"$DIR/herdr-machine-id")")
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG" "$CTR2"
+  expect_status 1
+  has_line "$stderr" "error the folder $DIR or its herdr-core state folder is already mounted by: $CTR; pm does not support a second container on the same folder, for consistency reasons"
+  run podman container exists -- "$CTR2"
+  [ "$status" -ne 0 ]
+  # the example creates a plain second container as printed
+  local line
+  line=$(grep -m1 '^  podman run ' <<<"$stderr") || fail "no example in: $stderr"
+  eval "$line" >/dev/null
+  podman container exists -- "$CTR2-2"
+}
+
+@test "pm run --hc adds a real hc machine; pm start brings hc serve back; pm rm --force drops the machine" {
+  use_host_hc
+  run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
-  has_line "$stderr" "pm run: note: the herdr-core state folder $state is already mounted by: $CTR; only one hc serve can run for it, and hc in every such container uses that core"
-  has_line "$output" "ok    hc serve started in $CTR2"
+  has_line "$output" "ok    hc machine $CTR added"
+  [ "$(host_machine "$CTR")" = "$(command -v podman) exec -i $CTR sh -c True" ] \
+    || fail "machine: $(hc machine ls --json)"
+  # hc on the host reaches the container through the via connection
+  run --separate-stderr hc exec --on "$CTR" uname -a
+  expect_status 0
+  [[ $output == Linux* ]] || fail "uname: $output"
+
+  # pm start brings the core back, with SHELL=/bin/bash
+  run --separate-stderr pm stop "$CTR"
+  expect_status 0
+  run --separate-stderr pm start "$CTR"
+  expect_status 0
+  has_line "$output" "ok    hc serve started in $CTR"
+  hc_serve_running "$CTR"
+  local shell
+  shell=$(hc_serve_shell "$CTR") || fail 'cannot read the environment of hc serve'
+  [ "$shell" = /bin/bash ] || fail "hc serve runs with SHELL=$shell"
+
+  # pm rm --force removes the container and its machine
+  run --separate-stderr pm rm --force "$CTR"
+  expect_status 0
+  has_line "$output" "ok    hc machine $CTR removed"
+  [ -z "$(host_machine "$CTR")" ] || fail "machine left: $(hc machine ls --json)"
 }
 
 @test "pm run --hc: a failed podman run removes container and network, keeps the identity" {

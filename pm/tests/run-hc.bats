@@ -96,6 +96,7 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   run --separate-stderr pm run --hc --mount "$P" "$IMG" c1
   expect_status 0
   echo '{}' >"$P/.devcontainer/devcontainer.json"
+  forget_containers
   run --separate-stderr pm run --hc --mount "$P" "$IMG" c2
   expect_status 0
   [[ $stderr != *'new herdr-core state folder'* ]] || fail "$stderr"
@@ -202,6 +203,7 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
     i=$((i + 1))
     printf '%s' "$content" >"$f"
     cp -- "$f" "$T/before"
+    forget_containers
     run --separate-stderr pm run --hc --mount "$P" "$IMG" "c$i"
     expect_status 0
     cmp -- "$f" "$T/before"
@@ -225,6 +227,7 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   for content in "${bad[@]}"; do
     i=$((i + 1))
     printf '%s' "$content" >"$f"
+    forget_containers
     run --separate-stderr pm run --hc --mount "$P" "$IMG" "c$i"
     expect_status 0
     is_id "$(<"$f")" || fail "case $i"
@@ -493,27 +496,6 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   hc_serve_call pm-proj || { podman_show; fail 'no podman exec -d -e SHELL=/bin/bash -- pm-proj hc serve'; }
   (( FOUND > r ))
   has_line "$output" 'ok    hc serve started in pm-proj'
-  [[ $stderr != *'already mounted by'* ]] || fail "$stderr"
-}
-
-@test "R1-02, BUG-11: pm notes the containers that already mount the state folder, one or many" {
-  need_python
-  local names state q i=0
-  for names in $'devc-myapp\npm-old' pm-old; do
-    i=$((i + 1))
-    export STUB_VOLUME_PS=$names
-    run --separate-stderr pm run --hc --mount "$P" "$IMG" "c$i"
-    expect_status 0
-    state=$HC/proj-$(sha256_hex "$(<"$P/herdr-machine-id")")
-    has_line "$stderr" "pm run: note: the herdr-core state folder $state is already mounted by: ${names//$'\n'/, }; only one hc serve can run for it, and hc in every such container uses that core"
-    # podman 6.2 matches a bind-mount source only in the source:target form
-    podman_find -x ps -a --filter "volume=$state:$STATE_TARGET" --format '{{.Names}}'
-    q=$FOUND
-    podman_find run
-    (( q < FOUND ))
-    hc_serve_call "c$i"
-    has_line "$output" "ok    hc serve started in c$i"
-  done
 }
 
 @test "S11: a failed hc serve is an error with its output; the container stays" {
@@ -553,6 +535,7 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   rm -- "$P/.gitignore"
   use_min_path
   fake_hash sha256sum
+  forget_containers
   run --separate-stderr pm run --hc --mount "$P" "$IMG" c3
   expect_status 0
   [[ $stderr != *'git does not ignore'* ]] || fail "$stderr"
@@ -571,6 +554,7 @@ esac'
   has_line "$(cat -- "$FAKE_GIT_LOG")" "-C $P check-ignore -q -- herdr-machine-id"
 
   export FAKE_GIT_RC=1
+  forget_containers
   run --separate-stderr pm run --hc --mount "$P" "$IMG" c2
   expect_status 0
   has_line "$stderr" "pm run: note: git does not ignore $P/herdr-machine-id; add it to .gitignore"
@@ -600,12 +584,19 @@ esac'
     '.config/herdr-core/container/<foldername>-<devcontainerId>' sha256 \
     /etc/machine-id "$STATE_TARGET" \
     'podman exec -d -e SHELL=/bin/bash <container> hc serve' \
-    'only one core runs per state folder' 'podman containers' Docker \
-    rollback 'pm rm'; do
+    'hc machine' 'pm-hc=<container-name>' 'pm start' rollback 'pm rm'; do
     [[ $section == *"$s"* ]] || fail "the herdr-core section lacks: $s"
   done
-  # the runs block lists the start command too
+  # the runs block lists the start command and the hc machine too
   has_line "$output" '      with --hc: podman exec -d -e SHELL=/bin/bash <container-name> hc serve'
+  [[ $output == *'hc machine add --name <container-name>'* ]] || fail 'runs: lacks hc machine add'
+  # D23: one container per folder, with its limits
+  has_line "$output" 'one container per folder:'
+  section=${output#*$'\n'one container per folder:$'\n'}
+  section=${section%%$'\n\n'*}
+  for s in 'podman containers' Docker 'as spelled' 'podman run'; do
+    [[ $section == *"$s"* ]] || fail "the one container per folder section lacks: $s"
+  done
 }
 
 @test "H3: pm help lists --hc in the run line" {
@@ -624,8 +615,16 @@ esac'
     .config/herdr-core/container/ 'one at a time' 'VS Code' git \
     'podman exec -d -e SHELL=/bin/bash <container> hc serve' \
     'only one core runs per state folder' .devcontainer/devcontainer.json \
-    '.devcontainer/<name>/devcontainer.json' 'podman containers' Docker; do
+    '.devcontainer/<name>/devcontainer.json' 'hc exec --on' 'pm-hc=' \
+    'pm start' 'pm rm'; do
     [[ $section == *"$s"* ]] || fail "the HERDR-CORE section lacks: $s"
+  done
+  # D23: one container per folder, with its limits
+  has_line "$output" 'ONE CONTAINER PER FOLDER'
+  section=${output#*$'\n'ONE CONTAINER PER FOLDER$'\n'}
+  section=${section%%$'\n'[A-Z]*}
+  for s in 'podman containers' Docker 'as spelled' 'podman run'; do
+    [[ $section == *"$s"* ]] || fail "the ONE CONTAINER PER FOLDER section lacks: $s"
   done
 }
 

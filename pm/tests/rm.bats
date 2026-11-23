@@ -66,7 +66,7 @@ setup() {
   has_line "$output" 'runs: podman rm [-f] <container>'
   run pm help
   expect_status 0
-  has_line "$output" '  rm         [--force] <container>  remove it and its pm network once unused'
+  has_line "$output" '  rm         [--force] <container>  remove it, its pm network once unused, and its hc machine'
   run pm readme
   expect_status 0
   [[ $output == *'pm rm --force pm-myapp'* ]] || fail 'the readme lacks pm rm --force'

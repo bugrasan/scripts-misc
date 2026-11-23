@@ -22,15 +22,19 @@ stub_setup() {
   T=$BATS_TEST_TMPDIR
   export HOME=$T/home NO_COLOR=1 GIT_CONFIG_NOSYSTEM=1 GIT_CEILING_DIRECTORIES=$T
   unset XDG_CONFIG_HOME CDPATH
-  export PODMAN_LOG=$T/podman.log STUB_STATE=$T/podman-state
+  export PODMAN_LOG=$T/podman.log STUB_STATE=$T/podman-state HC_LOG=$T/hc.log
   export STUB_HASH_LOG=$T/hash.log STUB_PYTHON=$PYTHON
   STUB_BIN=$T/stub-bin FAKE_BIN=$T/fake-bin MIN_BIN=$T/min-bin
   HC=$HOME/.config/herdr-core/container
   P=$T/proj
-  mkdir -p "$HOME" "$STUB_BIN" "$FAKE_BIN" "$STUB_STATE/containers" "$STUB_STATE/networks" "$P"
+  mkdir -p "$HOME" "$STUB_BIN" "$FAKE_BIN" "$P"
+  mkdir -p "$STUB_STATE"/{containers,networks,mounts,labels}
   : >"$PODMAN_LOG"
+  : >"$HC_LOG"
+  # the fake podman, and a fake host hc so that no real one is ever reached
   cp -- "$PM_TESTS_DIR/stub/podman" "$STUB_BIN/podman"
-  chmod 755 "$STUB_BIN/podman"
+  cp -- "$PM_TESTS_DIR/stub/hc" "$STUB_BIN/hc"
+  chmod 755 "$STUB_BIN/podman" "$STUB_BIN/hc"
   export PATH=$STUB_BIN:$PATH
   PM_PATH=$FAKE_BIN:$PATH
   # never reach a real podman
@@ -152,6 +156,38 @@ count_v() {
 hc_serve_call() {
   podman_find -x exec -d -e SHELL=/bin/bash -- "$1" hc serve
 }
+
+# fake_container <name> [<pm-hc label> [<mount source>...]]: a fake
+# container as podman run leaves it, without a podman call in the log
+fake_container() {
+  printf '\n' >"$STUB_STATE/containers/$1"
+  [[ -z ${2-} ]] || printf '%s\n' "$2" >"$STUB_STATE/labels/$1"
+  (( $# <= 2 )) || printf '%s\n' "${@:3}" >"$STUB_STATE/mounts/$1"
+}
+
+# forget_containers: drop all fake containers, so that the next pm run on
+# the same folder is no second container
+forget_containers() {
+  rm -f -- "$STUB_STATE"/containers/* "$STUB_STATE"/mounts/* "$STUB_STATE"/labels/*
+}
+
+# hc_find [-x] <arg>...: podman_find on the calls of the fake hc
+hc_find() { PODMAN_LOG=$HC_LOG podman_find "$@"; }
+hc_show() { PODMAN_LOG=$HC_LOG podman_show | sed 's/^podman /hc /'; }
+
+# pm_via <container>: the connection command pm gives hc for a container,
+# with the fake podman's path, which needs no quotes
+pm_via() { printf '%s exec -i %s sh -c\n' "$STUB_BIN/podman" "$1"; }
+
+# hc_machine <name> <target> [<via: true|false>]: one machine as hc machine
+# ls --json lists it (keys sorted, compact)
+hc_machine() {
+  printf '{"host":"h","id":"0123","name":%s,"session":null,"state":"connected","target":%s,"temporary":false,"version":"0.1.21","via":%s}' \
+    "$(json_str "$1")" "$(json_str "$2")" "${3:-true}"
+}
+
+# json_str <text>: <text> as a JSON string (quotes and backslashes only)
+json_str() { local s=${1//\\/\\\\}; printf '"%s"' "${s//\"/\\\"}"; }
 
 # no_create: pm created no network and no container
 no_create() {
