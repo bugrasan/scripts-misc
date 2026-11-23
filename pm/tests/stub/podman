@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# fake podman for the pm stub tests: appends each call to $PODMAN_LOG, one
+# line per call with every argument in printf %q form, and answers the
+# subcommands pm uses; it never runs a container
+#
+# state: $STUB_STATE/containers/<name> (holding the network name) and
+# $STUB_STATE/networks/<name> exist while that container or network does
+# settings, all optional:
+#   STUB_RUN_RC         exit status of `run`; a failed run leaves the
+#                       container created, as podman does (default 0)
+#   STUB_EXEC_RC        exit status of `exec` (default 0)
+#   STUB_EXEC_ERR       text `exec` prints to stderr
+#   STUB_NET_CREATE_RC  exit status of `network create` (default 0)
+#   STUB_STATUS         state `container inspect` reports (default running)
+#   STUB_IMAGES, STUB_NETWORKS, STUB_PS
+#                       lines `image list`, `network ls`, and `ps` print
+#   STUB_VOLUME_PS      lines `ps` prints for a volume= filter
+
+printf '%q ' "$@" >>"${PODMAN_LOG:?}"
+printf '\n' >>"$PODMAN_LOG"
+
+c=${STUB_STATE:?}/containers n=$STUB_STATE/networks
+last=${!#}   # pm passes the container or network last, after --
+
+case ${1-} in
+  container)
+    case ${2-} in
+      exists) [[ -e $c/$last ]]; exit ;;
+      inspect)
+        if [[ ! -e $c/$last ]]; then
+          printf 'Error: no such container %s\n' "$last" >&2
+          exit 125
+        fi
+        case $* in
+          # pm rm: the state, then one network per line
+          *NetworkSettings*) printf '%s\n%s\n' "${STUB_STATUS:-running}" "$(<"$c/$last")" ;;
+          *State.Running*)
+            if [[ ${STUB_STATUS:-running} == running ]]; then echo true; else echo false; fi ;;
+          *) printf '[{"Name":"%s"}]\n' "$last" ;;
+        esac
+        exit 0 ;;
+    esac ;;
+  network)
+    case ${2-} in
+      inspect)
+        if [[ ! -e $n/$last ]]; then
+          printf 'Error: unable to find network with name or ID %s\n' "$last" >&2
+          exit 125
+        fi
+        # pm run asks for name, label, driver, and isolate; pm rm for the label
+        case $* in
+          *'{{.Name}}'*) printf '%s\x1f%s\x1f%s\x1f%s\n' "$last" 8 bridge strict ;;
+          *) echo 8 ;;
+        esac
+        exit 0 ;;
+      create)
+        [[ ${STUB_NET_CREATE_RC:-0} == 0 ]] || exit "$STUB_NET_CREATE_RC"
+        : >"$n/$last"
+        printf '%s\n' "$last"
+        exit 0 ;;
+      rm) rm -f -- "$n/$last"; printf '%s\n' "$last"; exit 0 ;;
+      ls) [[ -z ${STUB_NETWORKS-} ]] || printf '%s\n' "$STUB_NETWORKS"; exit 0 ;;
+    esac ;;
+  run)
+    # remember the container and its network for exists, inspect, and rm
+    args=("$@") name='' net=''
+    for (( i = 1; i < ${#args[@]} - 1; i++ )); do
+      case ${args[i]} in
+        --name)    name=${args[i+1]} ;;
+        --network) net=${args[i+1]} ;;
+      esac
+    done
+    [[ -z $name ]] || printf '%s\n' "$net" >"$c/$name"
+    if [[ ${STUB_RUN_RC:-0} != 0 ]]; then
+      echo 'Error: stub: podman run failed' >&2
+      exit "$STUB_RUN_RC"
+    fi
+    echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    exit 0 ;;
+  exec)
+    [[ -z ${STUB_EXEC_ERR-} ]] || printf '%s\n' "$STUB_EXEC_ERR" >&2
+    [[ ${STUB_EXEC_RC:-0} != 0 ]] || echo fedcba9876543210fedcba9876543210
+    exit "${STUB_EXEC_RC:-0}" ;;
+  rm)    rm -f -- "$c/$last"; printf '%s\n' "$last"; exit 0 ;;
+  ps)
+    # pm run asks who mounts the herdr-core state folder (volume=), and
+    # pm rm and pm run who uses a network
+    case $* in
+      *volume=*) [[ -z ${STUB_VOLUME_PS-} ]] || printf '%s\n' "$STUB_VOLUME_PS" ;;
+      *)         [[ -z ${STUB_PS-} ]] || printf '%s\n' "$STUB_PS" ;;
+    esac
+    exit 0 ;;
+  image) [[ -z ${STUB_IMAGES-} ]] || printf '%s\n' "$STUB_IMAGES"; exit 0 ;;
+esac
+exit 0
