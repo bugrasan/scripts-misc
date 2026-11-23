@@ -147,9 +147,9 @@ count_v() {
   echo "$n"
 }
 
-# hc_serve_call <container>: find `exec -d [--] <container> hc serve`
+# hc_serve_call <container>: find the exact call that starts the core
 hc_serve_call() {
-  podman_find -x exec -d -- "$1" hc serve || podman_find -x exec -d "$1" hc serve
+  podman_find -x exec -d -e SHELL=/bin/bash -- "$1" hc serve
 }
 
 # no_create: pm created no network and no container

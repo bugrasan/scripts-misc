@@ -145,6 +145,8 @@ _pm_sha256() {
     return 1
   fi || return 1
   read -r h _ <<<"$out"
+  # accept only a digest: other output, such as an error text, would give
+  # a wrong state folder name or break the base-32 conversion
   if [[ ${#h} != 64 || $h == *[!0123456789abcdef]* ]]; then
     _pm_err "unexpected sha256 output: $out"
     return 1
@@ -154,9 +156,10 @@ _pm_sha256() {
 
 # $1 as a JSON string with the escapes of JSON.stringify, which the
 # devcontainer CLI hashes: \\ \" \b \f \n \r \t, other control characters
-# as \u00xx; everything else stays as it is
+# as \u00xx; everything else stays as it is; LC_ALL=C works on bytes, as
+# a multibyte locale such as GBK can hide a \ inside a character
 _pm_json_str() {
-  local s=$1 i h c
+  local s=$1 i h c LC_ALL=C
   s=${s//\\/\\\\}; s=${s//\"/\\\"}
   s=${s//$'\b'/\\b}; s=${s//$'\f'/\\f}; s=${s//$'\n'/\\n}
   s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
@@ -243,7 +246,10 @@ _pm_hc_prepare() {
   else h=$(printf '%s' "$id" | _pm_sha256) || return 1; fi
   _pm_hc_state=$cfg/container/${abs##*/}-$h
   [[ -d $_pm_hc_state ]] || new=1
-  if ! mkdir -p -- "$_pm_hc_state" || ! chmod 700 -- "$cfg" "$_pm_hc_state"; then
+  # mode 700 as the template sets it: the state holds terminal output, which
+  # may contain secrets; `--` comes first, as BSD chmod stops parsing options
+  # at the mode and would take a later `--` for a file
+  if ! mkdir -p -- "$_pm_hc_state" || ! chmod -- 700 "$cfg" "$_pm_hc_state"; then
     _pm_err "cannot prepare the herdr-core state folder $_pm_hc_state"
     return 1
   fi
@@ -296,13 +302,16 @@ herdr-core:
   pm writes a missing or invalid id file, creates a missing state folder,
   mounts the id file at /etc/machine-id (read-only) and the state folder at
   /home/vscode/.local/state/herdr-core, and after podman run starts the
-  core with: podman exec -d <container> hc serve
+  core with: podman exec -d -e SHELL=/bin/bash <container> hc serve
+  only one core runs per state folder, and hc in every container that
+  mounts it uses that core; pm notes containers that already mount it
   pm keeps the id file and the state folder on rollback and on pm rm
 
 runs: podman network create -o isolate=strict --label pm-script=$PM_VERSION <network>
       podman run -d --init --userns=keep-id --label pm-script=$PM_VERSION
       [--network <network>] [-v ...] [--secret ...] --name <container-name>
       <image> sleep infinity
+      with --hc: podman exec -d -e SHELL=/bin/bash <container-name> hc serve
 then: pm bash <container-name>"
   # --init forwards signals to `sleep infinity`, so pm stop does not wait
   # for the SIGKILL timeout; keep-id maps the host UID/GID into the
@@ -404,6 +413,14 @@ then: pm bash <container-name>"
     _pm_hc_prepare "$abs" || return 1
     opts+=(-v "$_pm_hc_file:/etc/machine-id:ro"
       -v "$_pm_hc_state:/home/vscode/.local/state/herdr-core")
+    # one core per state folder: hc in every container that mounts it uses
+    # the core that holds its lock, so name the containers that mount it
+    # already; podman matches a bind source only in the source:target form
+    local hcusers
+    hcusers=$(podman ps -a --filter "volume=$_pm_hc_state:/home/vscode/.local/state/herdr-core" \
+      --format '{{.Names}}' 2>/dev/null)
+    [[ -z $hcusers ]] || printf 'pm run: note: %s already mount the herdr-core state folder %s; only one hc serve can run for it, and hc in every such container uses that core\n' \
+      "${hcusers//$'\n'/, }" "$_pm_hc_state" >&2
   fi
 
   # one --secret per requested token; podman exposes each as an env var
@@ -449,11 +466,13 @@ then: pm bash <container-name>"
   fi
   trap - INT
 
-  # hc serve runs the core in the foreground, hence -d; on failure the
-  # container stays, as it runs fine without the core
+  # hc serve runs the core in the foreground, hence -d, and sleep infinity
+  # stays the main process; podman sets no SHELL, and the core starts new
+  # shells from its own, else /bin/sh; on failure the container stays, as
+  # it runs fine without the core
   if (( hc )); then
     local out
-    if out=$(podman exec -d -- "$name" hc serve 2>&1); then
+    if out=$(podman exec -d -e SHELL=/bin/bash -- "$name" hc serve 2>&1); then
       _pm_ok "hc serve started in $name"
     else
       _pm_err "$name: hc serve: $out"
@@ -1397,9 +1416,11 @@ GIT WORKTREES
 HERDR-CORE
 
   pm run --hc gives the container a stable herdr-core identity and starts
-  the core in it with podman exec -d <container> hc serve. The identity
-  lives on the host in an id file, mounted read-only at /etc/machine-id,
-  and a state folder, mounted at /home/vscode/.local/state/herdr-core:
+  the core in it with podman exec -d -e SHELL=/bin/bash <container> hc serve;
+  podman sets no SHELL, and the core starts new shells from its own. The
+  identity lives on the host in an id file, mounted read-only at
+  /etc/machine-id, and a state folder, mounted at
+  /home/vscode/.local/state/herdr-core:
 
   pm run --hc --mount ~/src/myapp <image>   # an image with hc on its PATH
 
@@ -1412,9 +1433,14 @@ HERDR-CORE
 
   To start over, delete the id file and the state folder. The dev container
   and a pm container of one project share the identity and the state, so
-  run only one at a time. The devcontainerId depends on the folder path, so
-  it matches only when VS Code opened the same path as --mount. Keep the id
-  file out of git; pm notes when git does not ignore it.
+  run only one at a time: only one core runs per state folder, hc in every
+  container that mounts it uses that core, and pm notes containers that
+  already mount it. The devcontainerId depends on the folder path, so it
+  matches only when VS Code opened the same path as --mount, and only for
+  .devcontainer/devcontainer.json; a config in
+  .devcontainer/<name>/devcontainer.json gets another devcontainerId, so
+  that dev container shares the id file but not the state folder. Keep the
+  id file out of git; pm notes when git does not ignore it.
 
 INSPECT
 

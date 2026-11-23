@@ -126,6 +126,19 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   [ "$output" = "$(ref_id "$s")" ]
 }
 
+@test "R1-03: the devcontainerId does not depend on a multibyte locale such as GBK" {
+  need_node
+  command -v localedef >/dev/null || skip 'localedef not found'
+  # the last byte of U+4E01 in UTF-8 and the \ after it form one GBK character
+  local p=$'/x/\xe4\xb8\x81\\y'
+  mkdir -p "$T/locale"
+  localedef -c -i zh_CN -f GBK "$T/locale/zh_CN.GBK" >/dev/null 2>&1 || skip 'cannot build a GBK locale'
+  [ "$(LOCPATH=$T/locale LC_ALL=zh_CN.GBK locale charmap 2>/dev/null)" = GBK ] || skip 'GBK locale not usable'
+  LOCPATH=$T/locale LC_ALL=zh_CN.GBK run --separate-stderr pm_internal _pm_devcontainer_id "$p"
+  expect_status 0
+  [ "$output" = "$(ref_id "$p")" ]
+}
+
 @test "S4: folders with special characters get the reference devcontainerId" {
   need_node
   local -a names=('with space' 'dq"uote' "sq'uote" 'back\slash' $'\xc3\xbcmlaut-\xe6\x97\xa5\xe6\x9c\xac'
@@ -268,6 +281,16 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   is_id "$(<"$P/herdr-machine-id")"
 }
 
+@test "S6: a failing uuidgen falls back to /proc/sys/kernel/random/uuid" {
+  [[ -r /proc/sys/kernel/random/uuid ]] || skip 'no /proc/sys/kernel/random/uuid'
+  # the output of a failed uuidgen must not become the id
+  fake uuidgen 'echo 0123ABCD-4567-89EF-0123-456789ABCDEF; exit 1'
+  run --separate-stderr pm run --hc --mount "$P" "$IMG"
+  expect_status 0
+  is_id "$(<"$P/herdr-machine-id")"
+  [ "$(<"$P/herdr-machine-id")" != 0123abcd456789ef0123456789abcdef ]
+}
+
 @test "S6: an unusable new id is an error and writes nothing" {
   fake uuidgen 'echo not-a-uuid'
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
@@ -336,6 +359,17 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   expect_status 1
   [[ $stderr == *error* ]]
   no_create
+}
+
+@test "S7: chmod also works with BSD-style option parsing" {
+  local real
+  real=$(type -P chmod)
+  # GNU chmod with POSIXLY_CORRECT stops at the first operand, as BSD does
+  fake chmod "POSIXLY_CORRECT=1 exec $(printf %q "$real") \"\$@\""
+  run --separate-stderr pm run --hc --mount "$P" "$IMG"
+  expect_status 0
+  [ "$(file_mode "$HOME/.config/herdr-core")" = 700 ]
+  [ "$(file_mode "$HC/$(ls -A "$HC")")" = 700 ]
 }
 
 @test "S7: a failed chmod is an error and creates nothing in podman" {
@@ -419,9 +453,11 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
 
 @test "S9: no sha256 tool is an error and creates nothing in podman" {
   use_min_path
+  printf '0123456789abcdef0123456789abcdef\n' >"$P/herdr-machine-id"
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 1
-  [[ $stderr == *error* ]]
+  has_line "$stderr" 'error no sha256 tool found; install sha256sum, shasum, or openssl'
+  [ "$(<"$P/herdr-machine-id")" = 0123456789abcdef0123456789abcdef ]
   no_create
 }
 
@@ -448,14 +484,32 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   if podman_find exec; then fail 'unexpected podman exec'; fi
 }
 
-@test "S11: after podman run, pm starts hc serve detached and reports it" {
+@test "S11: after podman run, pm starts hc serve detached with SHELL=/bin/bash" {
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
   local r
   podman_find run
   r=$FOUND
-  hc_serve_call pm-proj || { podman_show; fail 'no podman exec -d pm-proj hc serve'; }
+  hc_serve_call pm-proj || { podman_show; fail 'no podman exec -d -e SHELL=/bin/bash -- pm-proj hc serve'; }
   (( FOUND > r ))
+  has_line "$output" 'ok    hc serve started in pm-proj'
+  [[ $stderr != *'already mount'* ]] || fail "$stderr"
+}
+
+@test "R1-02: pm notes containers that already mount the state folder, then starts as usual" {
+  need_python
+  export STUB_VOLUME_PS=$'devc-myapp\npm-old'
+  run --separate-stderr pm run --hc --mount "$P" "$IMG"
+  expect_status 0
+  local state q
+  state=$HC/proj-$(sha256_hex "$(<"$P/herdr-machine-id")")
+  has_line "$stderr" "pm run: note: devc-myapp, pm-old already mount the herdr-core state folder $state; only one hc serve can run for it, and hc in every such container uses that core"
+  # podman 6.2 matches a bind-mount source only in the source:target form
+  podman_find -x ps -a --filter "volume=$state:$STATE_TARGET" --format '{{.Names}}'
+  q=$FOUND
+  podman_find run
+  (( q < FOUND ))
+  hc_serve_call pm-proj
   has_line "$output" 'ok    hc serve started in pm-proj'
 }
 
@@ -538,12 +592,16 @@ esac'
   grep -qE '^  --hc +[a-z]' <<<"$output" || fail 'no option line for --hc'
   has_line "$output" 'herdr-core:'
   local section=${output#*$'\n'herdr-core:$'\n'} s
+  section=${section%%$'\n'runs:*}
   for s in '<dir>/.devcontainer/herdr-machine-id' '<dir>/herdr-machine-id' \
     '.config/herdr-core/container/<foldername>-<devcontainerId>' sha256 \
-    /etc/machine-id "$STATE_TARGET" 'podman exec -d <container> hc serve' \
-    rollback 'pm rm'; do
+    /etc/machine-id "$STATE_TARGET" \
+    'podman exec -d -e SHELL=/bin/bash <container> hc serve' \
+    'only one core runs per state folder' rollback 'pm rm'; do
     [[ $section == *"$s"* ]] || fail "the herdr-core section lacks: $s"
   done
+  # the runs block lists the start command too
+  has_line "$output" '      with --hc: podman exec -d -e SHELL=/bin/bash <container-name> hc serve'
 }
 
 @test "H3: pm help lists --hc in the run line" {
@@ -559,7 +617,10 @@ esac'
   local section=${output#*$'\n'HERDR-CORE$'\n'} s
   section=${section%%$'\n'[A-Z]*}
   for s in --hc /etc/machine-id .devcontainer/herdr-machine-id \
-    .config/herdr-core/container/ 'one at a time' 'VS Code' git; do
+    .config/herdr-core/container/ 'one at a time' 'VS Code' git \
+    'podman exec -d -e SHELL=/bin/bash <container> hc serve' \
+    'only one core runs per state folder' .devcontainer/devcontainer.json \
+    '.devcontainer/<name>/devcontainer.json'; do
     [[ $section == *"$s"* ]] || fail "the HERDR-CORE section lacks: $s"
   done
 }

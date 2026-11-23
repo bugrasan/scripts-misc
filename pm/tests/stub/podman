@@ -14,6 +14,7 @@
 #   STUB_STATUS         state `container inspect` reports (default running)
 #   STUB_IMAGES, STUB_NETWORKS, STUB_PS
 #                       lines `image list`, `network ls`, and `ps` print
+#   STUB_VOLUME_PS      lines `ps` prints for a volume= filter
 
 printf '%q ' "$@" >>"${PODMAN_LOG:?}"
 printf '\n' >>"$PODMAN_LOG"
@@ -81,7 +82,14 @@ case ${1-} in
     [[ ${STUB_EXEC_RC:-0} != 0 ]] || echo fedcba9876543210fedcba9876543210
     exit "${STUB_EXEC_RC:-0}" ;;
   rm)    rm -f -- "$c/$last"; printf '%s\n' "$last"; exit 0 ;;
-  ps)    [[ -z ${STUB_PS-} ]] || printf '%s\n' "$STUB_PS"; exit 0 ;;
+  ps)
+    # pm run asks who mounts the herdr-core state folder (volume=), and
+    # pm rm and pm run who uses a network
+    case $* in
+      *volume=*) [[ -z ${STUB_VOLUME_PS-} ]] || printf '%s\n' "$STUB_VOLUME_PS" ;;
+      *)         [[ -z ${STUB_PS-} ]] || printf '%s\n' "$STUB_PS" ;;
+    esac
+    exit 0 ;;
   image) [[ -z ${STUB_IMAGES-} ]] || printf '%s\n' "$STUB_IMAGES"; exit 0 ;;
 esac
 exit 0

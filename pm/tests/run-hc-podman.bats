@@ -6,7 +6,10 @@
 # ghcr.io/bugrasan/devcontainer-base-ai/base:latest); needs python3
 # the tests write only below BATS_TEST_TMPDIR and to
 # $HOME/.config/herdr-core/container/<unique-name>-*, and remove their
-# containers, networks, and state folders also when they fail
+# containers, networks, and state folders also when they fail; pm itself
+# also creates $HOME/.config/herdr-core/container in the real HOME when it
+# is missing and sets $HOME/.config/herdr-core to mode 700, as it does for
+# every pm run --hc; the tests leave both in place
 
 load test_helper
 
@@ -19,6 +22,7 @@ setup() {
   NAME=pmhc-t$BATS_TEST_NUMBER-$$-$RANDOM
   DIR=$BATS_TEST_TMPDIR/$NAME
   CTR=pm-$NAME
+  CTR2=$CTR-2
   NET=$NAME
   HC=$HOME/.config/herdr-core/container
   mkdir -p -- "$DIR"
@@ -27,6 +31,7 @@ setup() {
 teardown() {
   [[ -n ${NAME-} ]] || return 0
   podman rm -f -t 0 -- "$CTR" >/dev/null 2>&1 || true
+  podman rm -f -t 0 -- "$CTR2" >/dev/null 2>&1 || true
   podman network rm -- "$NET" >/dev/null 2>&1 || true
   local d
   for d in "$HC/$NAME"-*; do
@@ -59,7 +64,8 @@ print(d["machine_id"], d["id"])' "$f" 2>/dev/null); then
 
 # core_started <state> <marker>: wait up to 30 s for a core.lock below
 # <state> newer than the file <marker>; herdr-core rewrites the lock at
-# each start, but core.json only when it creates a new identity
+# each start, but core.json only when it creates the identity or when a
+# stored core.json takes on a new machine-id
 core_started() {
   local i
   for (( i = 0; i < 60; i++ )); do
@@ -102,6 +108,18 @@ hc_serve_running() {
   fail "no hc serve process in $1"
 }
 
+# hc_serve_shell <container>: SHELL in the environment of the running
+# hc serve process, from /proc/<pid>/environ inside the container
+hc_serve_shell() {
+  podman exec "$1" sh -c '
+    for p in /proc/[0-9]*; do
+      [ "$(tr "\000" " " <"$p/cmdline" 2>/dev/null)" = "hc serve " ] || continue
+      tr "\000" "\n" <"$p/environ" | sed -n "s/^SHELL=//p"
+      exit 0
+    done
+    exit 1'
+}
+
 @test "pm run --hc: mounts, hc serve, core.json; the identity survives pm rm -f" {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
@@ -125,6 +143,10 @@ hc_serve_running() {
   rm -f -- "$state/.pm-test-rw"
 
   hc_serve_running "$CTR"
+  # podman sets no SHELL; pm passes it, as the core starts new shells from it
+  local shell
+  shell=$(hc_serve_shell "$CTR") || fail 'cannot read the environment of hc serve'
+  [ "$shell" = /bin/bash ] || fail "hc serve runs with SHELL=$shell"
   ids=$(core_ids "$state")
   read -r mid core_id <<<"$ids"
   [ "$mid" = "$id" ] || fail "machine_id $mid, id file $id"
@@ -167,6 +189,17 @@ hc_serve_running() {
   ids=$(core_ids "${states[0]}")
   read -r mid _ <<<"$ids"
   [ "$mid" = "$id" ] || fail "machine_id $mid, id file $id"
+}
+
+@test "pm run --hc: a second container on the same folder gets a note about the first" {
+  run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
+  expect_status 0
+  local state
+  state=$HC/$NAME-$(sha256_hex "$(<"$DIR/herdr-machine-id")")
+  run --separate-stderr pm run --hc --mount "$DIR" "$IMG" "$CTR2"
+  expect_status 0
+  has_line "$stderr" "pm run: note: $CTR already mount the herdr-core state folder $state; only one hc serve can run for it, and hc in every such container uses that core"
+  has_line "$output" "ok    hc serve started in $CTR2"
 }
 
 @test "pm run --hc: a failed podman run removes container and network, keeps the identity" {
