@@ -120,7 +120,7 @@ hc_serve_shell() {
     exit 1'
 }
 
-@test "pm run --hc: mounts, hc serve, core.json; the identity survives pm rm -f" {
+@test "pm run --hc: mounts, hc serve, core.json; the identity survives pm rm --force" {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
   has_line "$output" "ok    hc serve started in $CTR"
@@ -153,8 +153,9 @@ hc_serve_shell() {
   [ -n "$core_id" ]
   [ "$(running_core_id "$CTR")" = "$core_id" ]
 
-  # pm rm -f keeps the id file and the state folder; a second run reuses them
-  run --separate-stderr pm rm -f "$CTR"
+  # pm rm --force keeps the id file and the state folder; a second run
+  # reuses them
+  run --separate-stderr pm rm --force "$CTR"
   expect_status 0
   [ "$(<"$f")" = "$id" ]
   [[ -d $state ]]
@@ -198,7 +199,7 @@ hc_serve_shell() {
   state=$HC/$NAME-$(sha256_hex "$(<"$DIR/herdr-machine-id")")
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG" "$CTR2"
   expect_status 0
-  has_line "$stderr" "pm run: note: $CTR already mount the herdr-core state folder $state; only one hc serve can run for it, and hc in every such container uses that core"
+  has_line "$stderr" "pm run: note: the herdr-core state folder $state is already mounted by: $CTR; only one hc serve can run for it, and hc in every such container uses that core"
   has_line "$output" "ok    hc serve started in $CTR2"
 }
 

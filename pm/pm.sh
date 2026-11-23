@@ -18,7 +18,7 @@ elif (return 0 2>/dev/null); then
   return 2
 fi
 
-PM_VERSION=8
+PM_VERSION=9
 
 # an exported CDPATH would make `cd` pick another directory and print it
 unset CDPATH
@@ -304,7 +304,8 @@ herdr-core:
   /home/vscode/.local/state/herdr-core, and after podman run starts the
   core with: podman exec -d -e SHELL=/bin/bash <container> hc serve
   only one core runs per state folder, and hc in every container that
-  mounts it uses that core; pm notes containers that already mount it
+  mounts it uses that core; pm notes podman containers that already mount
+  it, but does not detect containers of other engines, such as Docker
   pm keeps the id file and the state folder on rollback and on pm rm
 
 runs: podman network create -o isolate=strict --label pm-script=$PM_VERSION <network>
@@ -415,12 +416,13 @@ then: pm bash <container-name>"
       -v "$_pm_hc_state:/home/vscode/.local/state/herdr-core")
     # one core per state folder: hc in every container that mounts it uses
     # the core that holds its lock, so name the containers that mount it
-    # already; podman matches a bind source only in the source:target form
+    # already; podman matches a bind source only in the source:target form,
+    # and podman ps sees no containers of other engines, such as Docker
     local hcusers
     hcusers=$(podman ps -a --filter "volume=$_pm_hc_state:/home/vscode/.local/state/herdr-core" \
       --format '{{.Names}}' 2>/dev/null)
-    [[ -z $hcusers ]] || printf 'pm run: note: %s already mount the herdr-core state folder %s; only one hc serve can run for it, and hc in every such container uses that core\n' \
-      "${hcusers//$'\n'/, }" "$_pm_hc_state" >&2
+    [[ -z $hcusers ]] || printf 'pm run: note: the herdr-core state folder %s is already mounted by: %s; only one hc serve can run for it, and hc in every such container uses that core\n' \
+      "$_pm_hc_state" "${hcusers//$'\n'/, }" >&2
   fi
 
   # one --secret per requested token; podman exposes each as an env var
@@ -486,7 +488,7 @@ then: pm bash <container-name>"
 _pm_run_rollback() {
   local out
   podman container exists -- "$_pm_run_name" 2>/dev/null \
-    && podman rm -f -- "$_pm_run_name" >/dev/null 2>&1
+    && podman rm --force -- "$_pm_run_name" >/dev/null 2>&1
   [[ -n ${_pm_run_net-} ]] || return 0
   out=$(podman network rm -- "$_pm_run_net" 2>&1) \
     || _pm_err "network $_pm_run_net: $out"
@@ -533,24 +535,25 @@ runs: podman exec -it <container> bash'
 # ------------------------------------------------------------------ pm rm / net
 
 pm_rm() {
-  local help='usage: pm rm [-f | --force] <container>
+  local help='usage: pm rm [--force] <container>
 
 removes a container, then each network pm created for it once no other
 container uses that network
 
-  -f, --force  stop a running container first
+  --force      stop a running container first
   <container>  container to remove; completion lists all containers
 
-runs: podman rm [-f] <container>
+runs: podman rm [--force] <container>
       podman network rm <network>'
   local force=0 c='' a out state net label users rc=0
   local -a lines rmopt=()
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
+  # pm's force options are long only, so -f falls under unknown options
   for a; do
     case $a in
-      -f|--force) force=1 ;;
-      -*)         _pm_usage "$help"; return 2 ;;
-      *)          [[ -z $c ]] || { _pm_usage "$help"; return 2; }; c=$a ;;
+      --force) force=1 ;;
+      -*)      _pm_usage "$help"; return 2 ;;
+      *)       [[ -z $c ]] || { _pm_usage "$help"; return 2; }; c=$a ;;
     esac
   done
   [[ -n $c ]] || { _pm_usage "$help"; return 2; }
@@ -567,10 +570,10 @@ runs: podman rm [-f] <container>
   mapfile -t lines <<<"$out"
   state=${lines[0]}
   if [[ $state == running || $state == paused ]] && (( ! force )); then
-    _pm_err "container $c is $state; stop it with: pm stop $c, or use: pm rm -f $c"
+    _pm_err "container $c is $state; stop it with: pm stop $c, or use: pm rm --force $c"
     return 1
   fi
-  (( force )) && rmopt=(-f)
+  (( force )) && rmopt=(--force)
   if out=$(podman rm "${rmopt[@]}" -- "$c" 2>&1); then
     _pm_ok "container $c removed"
   else
@@ -998,16 +1001,16 @@ _pm_candidates() {
   [[ $sub == run ]] && { _pm_candidates_run; return 0; }
 
   # flags of the other subcommands, offered for the first argument only;
-  # pm rm also takes -f after the container
+  # pm rm also takes --force after the container
   if [[ $cur == -* ]]; then
     if [[ $sub == rm ]] && (( arg == 2 )) && [[ ${_pm_words[2]} != -* ]]; then
-      _pm_kind=words; _pm_reply=(-f --force); return 0
+      _pm_kind=words; _pm_reply=(--force); return 0
     fi
     (( arg == 1 )) || return 0
     _pm_kind=words
     case $sub in
       ps)               _pm_reply=(-a --all --help) ;;
-      rm)               _pm_reply=(-f --force --help) ;;
+      rm)               _pm_reply=(--force --help) ;;
       sh-file|zsh-file) _pm_reply=(--force --help) ;;
       *)                _pm_reply=(--help) ;;
     esac
@@ -1019,8 +1022,8 @@ _pm_candidates() {
     start) (( arg == 1 )) && _pm_list_containers --all \
              --filter status=created --filter status=exited --filter status=stopped ;;
     stop|bash) (( arg == 1 )) && _pm_list_containers --filter status=running ;;
-    # the container follows an optional -f or --force
-    rm)    if (( arg == 1 )) || [[ $arg == 2 && ( ${_pm_words[2]} == -f || ${_pm_words[2]} == --force ) ]]; then
+    # the container follows an optional --force
+    rm)    if (( arg == 1 )) || [[ $arg == 2 && ${_pm_words[2]} == --force ]]; then
              _pm_list_containers --all
            fi ;;
     # view keywords plus container names, then names after a keyword
@@ -1155,16 +1158,16 @@ _pm_candidates() {
   [[ $sub == run ]] && { _pm_candidates_run; return 0; }
 
   # flags of the other subcommands, offered for the first argument only;
-  # pm rm also takes -f after the container
+  # pm rm also takes --force after the container
   if [[ $cur == -* ]]; then
     if [[ $sub == rm ]] && (( arg == 2 )) && [[ ${words[3]} != -* ]]; then
-      REPLY=words; reply=( -f --force ); return 0
+      REPLY=words; reply=( --force ); return 0
     fi
     (( arg == 1 )) || return 0
     REPLY=words
     case $sub in
       ps)               reply=( -a --all --help ) ;;
-      rm)               reply=( -f --force --help ) ;;
+      rm)               reply=( --force --help ) ;;
       sh-file|zsh-file) reply=( --force --help ) ;;
       *)                reply=( --help ) ;;
     esac
@@ -1176,8 +1179,8 @@ _pm_candidates() {
     start) (( arg == 1 )) && _pm_list_containers --all \
              --filter status=created --filter status=exited --filter status=stopped ;;
     stop|bash) (( arg == 1 )) && _pm_list_containers --filter status=running ;;
-    # the container follows an optional -f or --force
-    rm)    if (( arg == 1 )) || [[ $arg == 2 && ${words[3]} == (-f|--force) ]]; then
+    # the container follows an optional --force
+    rm)    if (( arg == 1 )) || [[ $arg == 2 && ${words[3]} == --force ]]; then
              _pm_list_containers --all
            fi ;;
     # view keywords plus container names, then names after a keyword
@@ -1323,7 +1326,7 @@ pm_usage() {
     '  start      <container>' \
     '  stop       <container>' \
     '  bash       <container>    interactive bash terminal in a running container' \
-    '  rm         [-f] <container>  remove it and its pm network once unused' \
+    '  rm         [--force] <container>  remove it and its pm network once unused' \
     '  ps         [-a] | <container> | labels|mounts|ns|id [<container>]' \
     '  net        networks and their containers' \
     '  cp         <container> <local-file> <dest-name>' \
@@ -1384,7 +1387,7 @@ QUICK START
   pm ps               # running containers; pm ps -a lists all
   pm stop pm-myapp
   pm start pm-myapp
-  pm rm pm-myapp      # removes the container, then its network myapp
+  pm rm --force pm-myapp   # stops and removes it, then its network myapp
 
   # without a mount the container name is required
   pm run mcr.microsoft.com/devcontainers/base:bookworm scratch
@@ -1434,10 +1437,11 @@ HERDR-CORE
   To start over, delete the id file and the state folder. The dev container
   and a pm container of one project share the identity and the state, so
   run only one at a time: only one core runs per state folder, hc in every
-  container that mounts it uses that core, and pm notes containers that
-  already mount it. The devcontainerId depends on the folder path, so it
-  matches only when VS Code opened the same path as --mount, and only for
-  .devcontainer/devcontainer.json; a config in
+  container that mounts it uses that core, and pm notes podman containers
+  that already mount it; it does not detect containers of other engines,
+  such as a dev container under Docker. The devcontainerId depends on the
+  folder path, so it matches only when VS Code opened the same path as
+  --mount, and only for .devcontainer/devcontainer.json; a config in
   .devcontainer/<name>/devcontainer.json gets another devcontainerId, so
   that dev container shares the id file but not the state folder. Keep the
   id file out of git; pm notes when git does not ignore it.

@@ -74,10 +74,11 @@ need_git()    { command -v git >/dev/null || skip 'git not found'; }
 pm() { env PATH="${PM_PATH:-$PATH}" "$BASH" "$PM_SH" "$@"; }
 
 # pm_internal <function> [<arg>...]: call one of pm.sh's own functions;
-# pm.sh is evaluated without its final `main "$@"` line
+# pm.sh is evaluated without its final `main "$@"` line; grep reads it as
+# bytes, as in a test locale such as GBK it drops lines with an n-dash
 pm_internal() {
   env PATH="${PM_PATH:-$PATH}" "$BASH" -c \
-    'src=$(grep -vxF -- "$2" "$1") && eval "$src" && shift 2 && "$@"' \
+    'src=$(LC_ALL=C grep -a -vxF -- "$2" "$1") && eval "$src" && shift 2 && "$@"' \
     _ "$PM_SH" 'main "$@"' "$@"
 }
 

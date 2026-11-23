@@ -95,6 +95,20 @@ Observed with podman 6.2.0 and hc 0.1.21:
 - `hc server status --json` reports the running core's id as `core.id`
 - `podman ps --filter volume=<value>` compares a bare value with the mount target; only the form `<source>:<target>` matches a bind-mount source, so pm asks for `volume=<state folder>:/home/vscode/.local/state/herdr-core`
 
+## v9 (delivered in pm.sh, PM_VERSION=9)
+
+- V9-01 `PM_VERSION=9`: `pm --version` prints `pm 9`, and `pm run` labels containers and networks with `pm-script=9`
+- V9-02 BUG-10: the herdr-core section of `pm run --help` and the readme say that pm notes other podman containers that already mount the state folder; `podman ps` sees only this user's podman containers, so containers of other engines, such as a dev container under Docker, are not detected
+- V9-03 BUG-11: the note reads correctly for one or many names: `pm run: note: the herdr-core state folder <path> is already mounted by: <names>; only one hc serve can run for it, and hc in every such container uses that core`
+- V9-04 BUG-12: the tests read pm.sh as bytes (`LC_ALL=C grep -a` in `pm_internal`), so under the GBK test locale they evaluate the whole script; grep used to drop the lines with an n-dash
+- V9-05 every force option of pm is the long form only: `pm rm` accepts `--force` before or after the container and rejects `-f` like any other unknown option (usage to stderr, exit 2); the help, `pm help`, the readme (quick start: `pm rm --force pm-myapp`), the hint for a running or paused container (`stop it with: pm stop <container>, or use: pm rm --force <container>`), and both completions follow (no `-f`; containers after `--force`); `pm sh-file --force` and `pm zsh-file --force` already complied, and pm has no other force option
+- V9-06 pm's own podman calls use the long form too: `podman rm --force` in `pm rm` and in the rollback of a failed `pm run`; coreutils keep `-f` (`rm -f`, `mv -f`, `ln -sf`), as their BSD versions on macOS have no `--force`
+
+Tests (bats-core, `pm/tests/`):
+
+- new `rm.bats` (6 stub tests) for V9-05 and V9-06; `completion.bats` checks `pm rm` in both shells; `run-hc.bats` checks V9-01 to V9-03; `run-hc.bats` and `run-hc-podman.bats` use `pm rm --force` and the new note
+- against v8, 13 of the 64 stub tests fail; v9 passes all 64 as root and as a normal user (as root, the unreadable id file test skips)
+
 ## Open findings
 
 - major (v7 review) – `--userns=keep-id` maps the host UID, so on hosts where it is not 1000 the container user cannot write `/home/vscode` and `pm bash` uses another HOME; fix candidate: `--userns=keep-id:uid=1000,gid=1000` or `PM_USERNS`
