@@ -53,6 +53,44 @@ Observed on podman 4.9.3, not documented:
 - `podman network create` refuses a name that matches a prefix of an existing network ID ("already used"); pm passes that error on
 - the old netavark there rejects `isolate=strict` when a container starts; network features were tested with `isolate=true` substituted; podman 6 is untested
 
+## v8 (delivered in pm.sh, PM_VERSION=8)
+
+- V8-01 `pm run --hc` gives the container a stable herdr-core identity, an id file and a state folder on the host, bind-mounted as in the dev container template of bugrasan/devcontainer-base-ai (`src/base-ai/.devcontainer/devcontainer.json`), and starts the core; the flag works in any position before `--`, and repeating it is harmless
+- V8-02 `--hc` needs `--mount`; without it pm prints `pm run: --hc needs --mount`, a blank line, and the run help to stderr, and exits 2
+- V8-03 dev container case, when `<dir>/.devcontainer` is a folder: id file `<dir>/.devcontainer/herdr-machine-id`, state folder `$HOME/.config/herdr-core/container/<foldername>-<devcontainerId>`; pm computes the devcontainer CLI's `${devcontainerId}` for the logical mount path (symlinks kept) and the config file `<dir>/.devcontainer/devcontainer.json`, whether or not it exists: the sha256 of the sorted id labels as JSON (JSON.stringify escaping), read as a 256-bit number and written as 52 base-32 digits
+- V8-04 root case, without `<dir>/.devcontainer`: id file `<dir>/herdr-machine-id`, state folder `$HOME/.config/herdr-core/container/<foldername>-<sha256 hex of the id>`
+- V8-05 id file rules of the template's `initializeCommand`: pm keeps a valid id (32 lowercase hex digits once trailing newlines are dropped); it writes a missing or invalid one from `uuidgen`, else `/proc/sys/kernel/random/uuid` (dashes removed, lowercased), through a temp file and `mv`; a path that is not a regular file (a folder, a dangling link) or cannot be read is an error and stays untouched; a note for each new or replaced file
+- V8-06 state folder: `mkdir -p`, then `chmod 700` on `$HOME/.config/herdr-core` and on the folder; a note for a new folder; a failed `mkdir` or `chmod` is an error
+- V8-07 order: pm prepares the id file and the state folder after the container-exists check and before it creates a network or container, so a failure creates nothing in podman; the rollback of a failed `podman run` and `pm rm` keep both
+- V8-08 hash tool: `sha256sum`, else `shasum -a 256`, else `openssl dgst -sha256 -r`; with none, an error
+- V8-09 mounts: `-v <id file>:/etc/machine-id:ro` and `-v <state folder>:/home/vscode/.local/state/herdr-core`
+- V8-10 after `podman run`, `podman exec -d <container> hc serve` starts the core: a green ok line, or a red error with podman's output and exit 1; the container stays
+- V8-11 git note: when `git check-ignore` reports the id file as not ignored, pm prints `pm run: note: git does not ignore <file>; add it to .gitignore`; no note without git or outside a work tree
+- V8-12 `pm start`, `pm stop`, `pm rm`, and `pm ps` are unchanged; the new mounts are not below `/workspaces`, so PROJECT stays as it was
+- V8-13 `pm run --help` with the `--hc` option and a herdr-core section, `[--hc]` in `pm help`, a HERDR-CORE section in `pm readme`, and `--hc` in the bash and zsh completion of `pm run` while it is not on the line yet
+
+Decisions:
+
+- root-case state folder suffix: the sha256 hex of the id
+- `hc serve` is a hidden subcommand that runs the core in the foreground, so pm starts it with `podman exec -d`
+- `SHELL` and `PATH` are assumed set in the image; pm adds no handling
+- `$HOME/.config` is used literally, not `$XDG_CONFIG_HOME`, so the paths match the dev container's
+- `pm start` does not start the core; the first `hc` command does
+- an id file that exists but cannot be read is an error, not replaced: pm cannot tell whether it holds a valid id (the spec left this case open)
+- a `uuidgen` that fails is treated like a missing one: pm falls back to `/proc/sys/kernel/random/uuid`
+- the open finding about `:` in mount paths also applies to the two `--hc` mounts
+
+Tests (bats-core, `pm/tests/`):
+
+- stub tests: `run-hc.bats` (45 tests) and `completion.bats` (7 tests) run pm with a fake `podman` (`stub/podman`) first in PATH that logs every call, and with HOME in a per-test folder; they cover S1 to S12 and H1 to H5 of the v8 spec; devcontainerId expectations come from the spec's JavaScript reference under node (`devcontainer-id.js`), and the spec's known value is checked through pm's own `_pm_devcontainer_id`; run: `bats pm/tests/run-hc.bats pm/tests/completion.bats`
+- against v7, 43 of the 52 stub tests failed; v8 passes all 52 as root and as a normal user (as root, the unreadable id file test skips)
+- integration tests: `run-hc-podman.bats` (3 tests) with real rootless podman, only with `PM_TEST_PODMAN=1`; image from `PM_TEST_IMAGE` (default `ghcr.io/bugrasan/devcontainer-base-ai/base:latest`); on the test host, run as root: `pm-as-testuser env PM_TEST_PODMAN=1 bats pm/tests/run-hc-podman.bats`; passed with podman 6.2.0 and hc 0.1.21
+
+Observed with hc 0.1.21:
+
+- the core writes `<state folder>/default/core.json` (`id`, `name`, `machine_id`) only when it creates the identity; a later start rewrites `core.lock`, `default.sock`, and `terminals.json` and keeps `core.json`, so `name` stays the hostname of the first container
+- `hc server status --json` reports the running core's id as `core.id`
+
 ## Open findings
 
 - major (v7 review) – `--userns=keep-id` maps the host UID, so on hosts where it is not 1000 the container user cannot write `/home/vscode` and `pm bash` uses another HOME; fix candidate: `--userns=keep-id:uid=1000,gid=1000` or `PM_USERNS`

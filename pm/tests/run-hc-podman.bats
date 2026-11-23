@@ -36,13 +36,10 @@ teardown() {
   done
 }
 
-# core_ids <state> [<newer-than>]: wait up to 30 s for a core.json below
-# <state>, newer than the file <newer-than> when given, that has machine_id
-# and id; print "<machine_id> <id>"
+# core_ids <state>: wait up to 30 s for a core.json below <state> (in a
+# session folder) that has machine_id and id; print "<machine_id> <id>"
 core_ids() {
   local state=$1 i f out
-  local -a newer=()
-  [[ -z ${2-} ]] || newer=(-newer "$2")
   for (( i = 0; i < 60; i++ )); do
     while IFS= read -r f; do
       if out=$(python3 -I -c 'import json, sys
@@ -51,13 +48,43 @@ print(d["machine_id"], d["id"])' "$f" 2>/dev/null); then
         printf '%s\n' "$out"
         return 0
       fi
-    done < <(find "$state" -name core.json "${newer[@]}" 2>/dev/null)
+    done < <(find "$state" -name core.json 2>/dev/null)
     sleep 0.5
   done
   printf 'no usable core.json below %s after 30 s:\n' "$state" >&2
   find "$state" -ls >&2 || true
   find "$state" -name core.json -exec cat {} + >&2 || true
   return 1
+}
+
+# core_started <state> <marker>: wait up to 30 s for a core.lock below
+# <state> newer than the file <marker>; herdr-core rewrites the lock at
+# each start, but core.json only when it creates a new identity
+core_started() {
+  local i
+  for (( i = 0; i < 60; i++ )); do
+    [[ -z $(find "$1" -name core.lock -newer "$2" 2>/dev/null) ]] || return 0
+    sleep 0.5
+  done
+  find "$1" -ls >&2 || true
+  fail "no core started below $1 after 30 s"
+}
+
+# running_core_id <container>: the core id that hc server status reports,
+# polled for up to 30 s
+running_core_id() {
+  local i out
+  for (( i = 0; i < 60; i++ )); do
+    if out=$(podman exec "$1" hc server status --json 2>/dev/null \
+      | python3 -I -c 'import json, sys
+print(json.load(sys.stdin)["core"]["id"])' 2>/dev/null); then
+      printf '%s\n' "$out"
+      return 0
+    fi
+    sleep 0.5
+  done
+  podman exec "$1" hc server status --json >&2 || true
+  fail "hc server status in $1 reports no core id"
 }
 
 # hc_serve_running <container>: wait up to 30 s for a process `hc serve`
@@ -102,6 +129,7 @@ hc_serve_running() {
   read -r mid core_id <<<"$ids"
   [ "$mid" = "$id" ] || fail "machine_id $mid, id file $id"
   [ -n "$core_id" ]
+  [ "$(running_core_id "$CTR")" = "$core_id" ]
 
   # pm rm -f keeps the id file and the state folder; a second run reuses them
   run --separate-stderr pm rm -f "$CTR"
@@ -113,10 +141,12 @@ hc_serve_running() {
   expect_status 0
   [[ $stderr != *'new herdr-core state folder'* ]] || fail "$stderr"
   hc_serve_running "$CTR"
-  ids=$(core_ids "$state" "$BATS_TEST_TMPDIR/second-run")
+  core_started "$state" "$BATS_TEST_TMPDIR/second-run"
+  ids=$(core_ids "$state")
   read -r mid core_id2 <<<"$ids"
   [ "$mid" = "$id" ]
   [ "$core_id2" = "$core_id" ] || fail "core id changed: $core_id -> $core_id2"
+  [ "$(running_core_id "$CTR")" = "$core_id" ]
 }
 
 @test "pm run --hc with .devcontainer: dev container paths and a running core" {
