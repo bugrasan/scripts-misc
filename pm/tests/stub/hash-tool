@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# fake sha256sum, shasum, and openssl for the pm stub tests, installed under
+# those names: logs its name and arguments to $STUB_HASH_LOG and prints the
+# sha256 of stdin in that tool's output format, computed by $STUB_PYTHON
+
+printf '%s\n' "${0##*/}${*:+ $*}" >>"${STUB_HASH_LOG:?}"
+h=$("${STUB_PYTHON:?}" -I -c 'import hashlib, sys
+print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())') || exit 1
+case ${0##*/} in
+  openssl) printf '%s *stdin\n' "$h" ;;
+  *)       printf '%s  -\n' "$h" ;;
+esac

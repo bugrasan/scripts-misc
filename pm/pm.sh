@@ -18,7 +18,7 @@ elif (return 0 2>/dev/null); then
   return 2
 fi
 
-PM_VERSION=7
+PM_VERSION=8
 
 # an exported CDPATH would make `cd` pick another directory and print it
 unset CDPATH
@@ -131,14 +131,138 @@ _pm_zsh_file() {
   printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/zsh/site-functions/_pm"
 }
 
+# ------------------------------------------------------------------ herdr-core
+
+# sha256 of stdin as 64 lowercase hex digits, from the first tool found;
+# each tool prints the digest as its first field
+_pm_sha256() {
+  local out h
+  if command -v sha256sum >/dev/null 2>&1; then out=$(sha256sum)
+  elif command -v shasum >/dev/null 2>&1; then out=$(shasum -a 256)
+  elif command -v openssl >/dev/null 2>&1; then out=$(openssl dgst -sha256 -r)
+  else
+    _pm_err 'no sha256 tool found; install sha256sum, shasum, or openssl'
+    return 1
+  fi || return 1
+  read -r h _ <<<"$out"
+  if [[ ${#h} != 64 || $h == *[!0123456789abcdef]* ]]; then
+    _pm_err "unexpected sha256 output: $out"
+    return 1
+  fi
+  printf '%s\n' "$h"
+}
+
+# $1 as a JSON string with the escapes of JSON.stringify, which the
+# devcontainer CLI hashes: \\ \" \b \f \n \r \t, other control characters
+# as \u00xx; everything else stays as it is
+_pm_json_str() {
+  local s=$1 i h c
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}
+  s=${s//$'\b'/\\b}; s=${s//$'\f'/\\f}; s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
+  for (( i = 1; i < 32; i++ )); do
+    printf -v h '%02x' "$i"
+    printf -v c %b "\\x$h"
+    s=${s//"$c"/\\u00$h}
+  done
+  printf '"%s"' "$s"
+}
+
+# the devcontainer CLI's ${devcontainerId} for the local folder $1 and the
+# config file $1/.devcontainer/devcontainer.json: the sha256 of the sorted
+# id labels as JSON, read as a 256-bit number and written in base 32
+_pm_devcontainer_id() {
+  local d=0123456789abcdefghijklmnopqrstuv json hex out='' i j v
+  json="{\"devcontainer.config_file\":$(_pm_json_str "$1/.devcontainer/devcontainer.json"),"
+  json+="\"devcontainer.local_folder\":$(_pm_json_str "$1")}"
+  hex=$(printf '%s' "$json" | _pm_sha256) || return 1
+  # a leading 0 makes 65 hex digits: 13 groups of 20 bits, 4 digits each
+  hex=0$hex
+  for (( i = 0; i < 65; i += 5 )); do
+    v=$(( 16#${hex:i:5} ))
+    for (( j = 15; j >= 0; j -= 5 )); do out+=${d:$(( (v >> j) & 31 )):1}; done
+  done
+  printf '%s\n' "$out"
+}
+
+# prepare the herdr-core identity of the mount folder $1 as the dev
+# container template's initializeCommand does: keep or write the id file,
+# then create the state folder; sets _pm_hc_file and _pm_hc_state
+_pm_hc_prepare() {
+  local abs=$1 rel f id='' old=0 new=0 h tmp rc=0
+  local cfg=$HOME/.config/herdr-core
+  # the dev container keeps the id file in .devcontainer, else the root
+  if [[ -d $abs/.devcontainer ]]; then rel=.devcontainer/herdr-machine-id
+  else rel=herdr-machine-id; fi
+  f=$abs/$rel
+
+  # never touch what is not a regular file or cannot be read
+  if [[ -e $f || -L $f ]]; then
+    [[ -f $f ]] || { _pm_err "$f: not a regular file"; return 1; }
+    [[ -r $f ]] || { _pm_err "$f: not readable"; return 1; }
+    id=$(<"$f")
+    old=1
+  fi
+  # valid: 32 lowercase hex digits once $(<) dropped trailing newlines
+  if [[ ${#id} != 32 || $id == *[!0123456789abcdef]* ]]; then
+    # a new id as the template makes it: uuidgen, else the kernel's uuid,
+    # without dashes and lowercased
+    id=$(uuidgen 2>/dev/null) || id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null) || id=''
+    id=${id//-/}
+    id=${id,,}
+    if [[ ${#id} != 32 || $id == *[!0123456789abcdef]* ]]; then
+      _pm_err 'cannot make a herdr-core machine-id with uuidgen or /proc/sys/kernel/random/uuid'
+      return 1
+    fi
+    # a temp file and mv, so a failed write never leaves a partial file
+    tmp=${f%/*}/.herdr-machine-id.$$
+    if ! printf '%s\n' "$id" >"$tmp" || ! mv -f -- "$tmp" "$f"; then
+      rm -f -- "$tmp"
+      _pm_err "cannot write $f"
+      return 1
+    fi
+    if (( old )); then
+      printf 'pm run: note: replaced the invalid herdr-core machine-id: %s\n' "$f" >&2
+    else
+      printf 'pm run: note: wrote a new herdr-core machine-id: %s\n' "$f" >&2
+    fi
+  fi
+
+  # the id belongs to this host; note when git would pick the file up
+  if command -v git >/dev/null 2>&1 \
+    && [[ $(git -C "$abs" rev-parse --is-inside-work-tree 2>/dev/null) == true ]]; then
+    git -C "$abs" check-ignore -q -- "$rel" 2>/dev/null || rc=$?
+    if (( rc == 1 )); then
+      printf 'pm run: note: git does not ignore %s; add it to .gitignore\n' "$f" >&2
+    fi
+  fi
+
+  # state folder per devcontainerId, else per id; $HOME/.config even with
+  # XDG_CONFIG_HOME set, as the dev container mounts it from there
+  if [[ $rel == .devcontainer/* ]]; then h=$(_pm_devcontainer_id "$abs") || return 1
+  else h=$(printf '%s' "$id" | _pm_sha256) || return 1; fi
+  _pm_hc_state=$cfg/container/${abs##*/}-$h
+  [[ -d $_pm_hc_state ]] || new=1
+  if ! mkdir -p -- "$_pm_hc_state" || ! chmod 700 -- "$cfg" "$_pm_hc_state"; then
+    _pm_err "cannot prepare the herdr-core state folder $_pm_hc_state"
+    return 1
+  fi
+  if (( new )); then
+    printf 'pm run: note: new herdr-core state folder: %s\n' "$_pm_hc_state" >&2
+  fi
+  _pm_hc_file=$f
+}
+
 # ------------------------------------------------------------------ pm run
 
 pm_run() {
-  local cc=0 cp=0 mnt='' net='' image='' name='' npos=0 endflags=0
-  local help="usage: pm run [--cc] [--cp] [--mount <dir>] [--net <name>] <image> [<container-name>]
+  local cc=0 cp=0 hc=0 mnt='' net='' image='' name='' npos=0 endflags=0
+  local help="usage: pm run [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]
 
   --cc              pass the Claude Code token as a podman secret
   --cp              pass the GitHub Copilot token as a podman secret
+  --hc              give the container a stable herdr-core identity and start
+                    the herdr-core core in it; needs --mount, see herdr-core
   --mount <dir>     mount <dir> at /workspaces/<foldername> and, if it exists,
   --mnt <dir>       <dir>/../<foldername>.worktrees at
                     /workspaces/<foldername>.worktrees; unless a name is given,
@@ -160,6 +284,20 @@ network isolation:
   mode and is not isolated
   pm rm removes the network once no container uses it
   if podman run fails, pm removes the container and network it created
+
+herdr-core:
+  with --hc, an id file and a state folder on the host keep the identity;
+  with a <dir>/.devcontainer folder, at the dev container template's paths:
+    id file       <dir>/.devcontainer/herdr-machine-id
+    state folder  ~/.config/herdr-core/container/<foldername>-<devcontainerId>
+  without it:
+    id file       <dir>/herdr-machine-id
+    state folder  ~/.config/herdr-core/container/<foldername>-<sha256 of id>
+  pm writes a missing or invalid id file, creates a missing state folder,
+  mounts the id file at /etc/machine-id (read-only) and the state folder at
+  /home/vscode/.local/state/herdr-core, and after podman run starts the
+  core with: podman exec -d <container> hc serve
+  pm keeps the id file and the state folder on rollback and on pm rm
 
 runs: podman network create -o isolate=strict --label pm-script=$PM_VERSION <network>
       podman run -d --init --userns=keep-id --label pm-script=$PM_VERSION
@@ -183,6 +321,7 @@ then: pm bash <container-name>"
       case $1 in
         --cc)  cc=1; shift; continue ;;
         --cp)  cp=1; shift; continue ;;
+        --hc)  hc=1; shift; continue ;;
         --mount|--mnt|--mount=*|--mnt=*)
           if [[ -n $mnt ]]; then _pm_usage "pm run: --mount given twice"$'\n\n'"$help"; return 2; fi
           if [[ $1 == *=* ]]; then mnt=${1#*=}; shift
@@ -211,6 +350,12 @@ then: pm bash <container-name>"
     npos=$((npos + 1))
     shift
   done
+
+  # the herdr-core paths derive from the mounted folder
+  if (( hc )) && [[ -z $mnt ]]; then
+    _pm_usage "pm run: --hc needs --mount"$'\n\n'"$help"
+    return 2
+  fi
 
   if [[ -n $mnt ]]; then
     # podman reads a relative path as a volume name, so resolve it first
@@ -252,6 +397,13 @@ then: pm bash <container-name>"
   if podman container exists -- "$name" 2>/dev/null; then
     _pm_err "container $name exists; remove it with: pm rm $name"
     return 1
+  fi
+
+  # herdr-core files are ready before pm creates anything in podman
+  if (( hc )); then
+    _pm_hc_prepare "$abs" || return 1
+    opts+=(-v "$_pm_hc_file:/etc/machine-id:ro"
+      -v "$_pm_hc_state:/home/vscode/.local/state/herdr-core")
   fi
 
   # one --secret per requested token; podman exposes each as an env var
@@ -296,6 +448,18 @@ then: pm bash <container-name>"
     return 1
   fi
   trap - INT
+
+  # hc serve runs the core in the foreground, hence -d; on failure the
+  # container stays, as it runs fine without the core
+  if (( hc )); then
+    local out
+    if out=$(podman exec -d -- "$name" hc serve 2>&1); then
+      _pm_ok "hc serve started in $name"
+    else
+      _pm_err "$name: hc serve: $out"
+      return 1
+    fi
+  fi
 }
 
 # undo a failed pm run: the container it left in created state, then the
@@ -766,7 +930,7 @@ _pm_candidates_run() {
   # --mount and --mnt are one flag
   if [[ $cur == -* ]]; then
     _pm_kind=words
-    for f in --cc --cp --mount --mnt --net --help; do
+    for f in --cc --cp --hc --mount --mnt --net --help; do
       for (( i = 2; i < n - 1; i++ )); do
         w=${_pm_words[i]%%=*}
         [[ $w == "$f" ]] && continue 2
@@ -925,7 +1089,7 @@ _pm_candidates_run() {
   # --mount and --mnt are one flag
   if [[ $cur == -* ]]; then
     REPLY=words
-    for f in --cc --cp --mount --mnt --net --help; do
+    for f in --cc --cp --hc --mount --mnt --net --help; do
       (( ${before[(Ie)$f]} )) && continue
       [[ $f == --m*t ]] && (( ${before[(Ie)--mount]} || ${before[(Ie)--mnt]} )) && continue
       reply+=( $f )
@@ -1136,7 +1300,7 @@ pm_usage() {
     'usage: pm <subcommand> [<args>]' \
     '       pm <subcommand> --help' \
     '' \
-    '  run        [--cc] [--cp] [--mount <dir>] [--net <name>] <image> [<container-name>]' \
+    '  run        [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]' \
     '  start      <container>' \
     '  stop       <container>' \
     '  bash       <container>    interactive bash terminal in a running container' \
@@ -1229,6 +1393,28 @@ GIT WORKTREES
 
   This enables the relativeWorktrees repository extension, so older git
   versions cannot work with such a repository.
+
+HERDR-CORE
+
+  pm run --hc gives the container a stable herdr-core identity and starts
+  the core in it with podman exec -d <container> hc serve. The identity
+  lives on the host in an id file, mounted read-only at /etc/machine-id,
+  and a state folder, mounted at /home/vscode/.local/state/herdr-core:
+
+  pm run --hc --mount ~/src/myapp <image>   # an image with hc on its PATH
+
+  with ~/src/myapp/.devcontainer, the paths of the dev container template:
+    ~/src/myapp/.devcontainer/herdr-machine-id
+    ~/.config/herdr-core/container/myapp-<devcontainerId>
+  without it:
+    ~/src/myapp/herdr-machine-id
+    ~/.config/herdr-core/container/myapp-<sha256 of the id>
+
+  To start over, delete the id file and the state folder. The dev container
+  and a pm container of one project share the identity and the state, so
+  run only one at a time. The devcontainerId depends on the folder path, so
+  it matches only when VS Code opened the same path as --mount. Keep the id
+  file out of git; pm notes when git does not ignore it.
 
 INSPECT
 
