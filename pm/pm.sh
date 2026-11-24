@@ -36,6 +36,7 @@ unset CDPATH
 : "${PM_CLAUDE_MD:=$HOME/.claude/CLAUDE.md}"
 : "${PM_CLAUDE_SETTINGS:=$HOME/.claude/settings.json.template}"
 : "${PM_COPILOT_SETTINGS:=$HOME/.copilot/settings.json.template}"
+: "${PM_COPILOT_CONFIG:=$HOME/.copilot/config.json.template}"
 
 # ------------------------------------------------------------------ helpers
 
@@ -458,8 +459,8 @@ pm_run() {
   --cc              pass the Claude Code token (pm secret-cc) as a podman
                     secret, and copy CLAUDE.md and settings as pm cp-claude
   --cp              pass the GitHub Copilot token (pm secret-cp) as a podman
-                    secret, and copy the instructions and settings as
-                    pm cp-copilot
+                    secret, and copy the instructions, settings, and
+                    config as pm cp-copilot
   --hc              give the container a stable herdr-core identity, start
                     the core in it, and add it to hc here as a machine;
                     needs --mount, see herdr-core
@@ -525,7 +526,8 @@ runs: podman network create -o isolate=strict --label pm-script=$PM_VERSION <net
       [--label pm-hc=<container-name>] [--network <network>] [-v ...]
       [--secret ...] --name <container-name> <image> sleep infinity
       with --cc: as pm cp-claude, CLAUDE.md and settings into ~/.claude
-      with --cp: as pm cp-copilot, instructions and settings into ~/.copilot
+      with --cp: as pm cp-copilot, instructions, settings, and config.json
+        into ~/.copilot
       with --hc: podman exec -d -e SHELL=/bin/bash <container-name> hc serve
       hc machine add --name <container-name>
         --via '<podman> exec -i <container-name> sh -c'
@@ -1420,7 +1422,8 @@ table columns:
   CONFIG-CC   two states: ~/.claude/CLAUDE.md against PM_CLAUDE_MD, and
               ~/.claude/settings.json against PM_CLAUDE_SETTINGS
   CONFIG-CP   ~/.copilot/copilot-instructions.md against PM_CLAUDE_MD, and
-              ~/.copilot/settings.json against PM_COPILOT_SETTINGS
+              ~/.copilot/settings.json against PM_COPILOT_SETTINGS; not
+              config.json, which the Copilot CLI rewrites
   each state is identical, differ, or n/a (a file is missing on a side,
   or the container has no sha256sum), or stopped when the container does
   not run; one podman exec per running container, at most 5 at a time,
@@ -1519,7 +1522,9 @@ note: the parent directory of the destination must already exist'
 # ------------------------------------------------------ pm cp-claude / cp-copilot
 
 # the files of pm cp-claude and pm cp-copilot, also copied by pm run --cc
-# and --cp: CLAUDE.md is required, the settings template optional
+# and --cp: CLAUDE.md is required, the templates optional; config.json is
+# the Copilot CLI's saved state (trusted folders, sign-ins), from a
+# template so that no live state of this host goes in
 _pm_put_claude() {
   _pm_put_files "$1" .claude \
     "$PM_CLAUDE_MD" CLAUDE.md 1 \
@@ -1528,7 +1533,8 @@ _pm_put_claude() {
 _pm_put_copilot() {
   _pm_put_files "$1" .copilot \
     "$PM_CLAUDE_MD" copilot-instructions.md 1 \
-    "$PM_COPILOT_SETTINGS" settings.json 0
+    "$PM_COPILOT_SETTINGS" settings.json 0 \
+    "$PM_COPILOT_CONFIG" config.json 0
 }
 
 pm_cp_claude() {
@@ -1557,11 +1563,17 @@ copies into a running container:
     -> /home/vscode/.copilot/copilot-instructions.md
   $PM_COPILOT_SETTINGS
     -> /home/vscode/.copilot/settings.json  (skipped when missing)
+  $PM_COPILOT_CONFIG
+    -> /home/vscode/.copilot/config.json  (skipped when missing)
 
   <container>  running container; completion lists running containers only
 
+config.json holds the Copilot CLI's saved state, such as trusted folders
+and sign-ins; with the token, it spares a login in each container; pm
+copies a template, so no live state of this host goes in
+
 creates /home/vscode/.copilot first with: podman exec <container> mkdir -p
-sources: PM_CLAUDE_MD and PM_COPILOT_SETTINGS"
+sources: PM_CLAUDE_MD, PM_COPILOT_SETTINGS, and PM_COPILOT_CONFIG"
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
   if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
   _pm_put_copilot "$1"
@@ -2058,7 +2070,7 @@ pm_usage() {
     '  net        networks and their containers' \
     '  cp         <container> <local-file> <dest-name>' \
     '  cp-claude  <container>    alias cp-cc; CLAUDE.md and settings' \
-    '  cp-copilot <container>    alias cp-cp; instructions and settings' \
+    '  cp-copilot <container>    alias cp-cp; instructions, settings, and config' \
     '  secret-cc                 store the Claude Code token as a podman secret' \
     '  secret-cp                 store the GitHub Copilot token as a podman secret' \
     '  hc-add     <container>    add a pm run --hc container to hc here as a machine' \
@@ -2075,7 +2087,8 @@ pm_usage() {
     '  --version  print the version' \
     '' \
     'environment: PM_CC_SECRET, PM_CC_TARGET, PM_CP_SECRET, PM_CP_TARGET,' \
-    '             PM_CLAUDE_MD, PM_CLAUDE_SETTINGS, PM_COPILOT_SETTINGS'
+    '             PM_CLAUDE_MD, PM_CLAUDE_SETTINGS, PM_COPILOT_SETTINGS,' \
+    '             PM_COPILOT_CONFIG'
 }
 
 pm_readme() {
@@ -2106,7 +2119,10 @@ STORE THE AGENT TOKENS (once, and again to rotate them)
   see pm secret-cc --help. Recreate a container to be sure it gets a new token.
   With pm run --cc or --cp, pm passes the token to the new container and
   copies the agent files there, as pm cp-claude and pm cp-copilot do; a
-  missing secret stops it before anything is created.
+  missing secret stops it before anything is created. pm cp-copilot also
+  copies a config.json template, the Copilot CLI's saved state such as
+  trusted folders and sign-ins, so with the token no login is needed in
+  each container; a template keeps the live state of this host out.
 
 QUICK START
 
@@ -2237,6 +2253,7 @@ CONFIGURATION (environment variable and current value)
   PM_CLAUDE_MD         $PM_CLAUDE_MD
   PM_CLAUDE_SETTINGS   $PM_CLAUDE_SETTINGS
   PM_COPILOT_SETTINGS  $PM_COPILOT_SETTINGS
+  PM_COPILOT_CONFIG    $PM_COPILOT_CONFIG
 
 Every subcommand prints its details with --help, e.g. pm run --help.
 EOF

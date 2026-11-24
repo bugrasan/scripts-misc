@@ -157,6 +157,6 @@ fs() { printf '%s\n' "$STUB_STATE/fs/pm-proj$1"; }
   has_line "$output" "  PM_COPILOT_CONFIG    $PM_COPILOT_CONFIG"
   run pm run --help
   expect_status 0
-  [[ $output == *'with --cp: as pm cp-copilot, instructions, settings, and config.json into ~/.copilot'* ]] \
+  [[ $output == *'with --cp: as pm cp-copilot, instructions, settings, and config.json'* ]] \
     || fail "help: $output"
 }

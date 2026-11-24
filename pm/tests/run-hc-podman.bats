@@ -386,16 +386,20 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   SECRETS+=("$cp")
   export PM_CC_SECRET=$cc PM_CP_SECRET=$cp
   export PM_CLAUDE_MD=$BATS_TEST_TMPDIR/claude.md PM_CLAUDE_SETTINGS=$BATS_TEST_TMPDIR/claude.json \
-    PM_COPILOT_SETTINGS=$BATS_TEST_TMPDIR/copilot.json
+    PM_COPILOT_SETTINGS=$BATS_TEST_TMPDIR/copilot.json PM_COPILOT_CONFIG=$BATS_TEST_TMPDIR/config.json
   printf 'rules\n' >"$PM_CLAUDE_MD"
   printf '{"a":1}\n' >"$PM_CLAUDE_SETTINGS"
   printf '{"b":2}\n' >"$PM_COPILOT_SETTINGS"
+  printf '{"c":3}\n' >"$PM_COPILOT_CONFIG"
 
   run --separate-stderr pm run --cc --cp --mount "$DIR" "$IMG"
   expect_status 0
   [ "$(podman exec "$CTR" cat /home/vscode/.claude/CLAUDE.md)" = rules ]
   [ "$(podman exec "$CTR" cat /home/vscode/.copilot/copilot-instructions.md)" = rules ]
   [ "$(podman exec "$CTR" cat /home/vscode/.copilot/settings.json)" = '{"b":2}' ]
+  [ "$(podman exec "$CTR" cat /home/vscode/.copilot/config.json)" = '{"c":3}' ]
+  # the Copilot CLI rewrites config.json, so pm ps --agents never compares it
+  podman exec "$CTR" sh -c 'echo rewritten >/home/vscode/.copilot/config.json'
 
   run --separate-stderr pm ps --agents
   expect_status 0
