@@ -23,8 +23,13 @@
 #   STUB_RUN_RC         exit status of `run`; a failed run leaves the
 #                       container created, as podman does (default 0)
 #   STUB_START_RC       exit status of `start` (default 0)
+#   STUB_STOP_RC        exit status of `stop` (default 0)
 #   STUB_EXEC_RC        exit status of `exec ... hc serve` (default 0)
 #   STUB_EXEC_ERR       text `exec ... hc serve` prints to stderr
+#   STUB_HCSTOP_RC      exit status of `exec ... hc server stop`; it then
+#                       prints STUB_HCSTOP_OUT to stderr
+#   STUB_HCSTOP_OUT     without STUB_HCSTOP_RC: what it prints instead of
+#                       {"stopped":true} or {"stopped":false}
 #   STUB_CP_RC          exit status of `cp` (default 0)
 #   STUB_NET_CREATE_RC  exit status of `network create` (default 0)
 #   STUB_STATUS         state of containers without a status file
@@ -127,6 +132,8 @@ case ${1-} in
           *pm-hc*State.Status*) printf '%s\n' "$(jlabel "$last")$us$(status "$last")" ;;
           # pm start, pm hc-rm: the pm-hc label as json
           *pm-hc*) printf '%s\n' "$(jlabel "$last")" ;;
+          # pm run, when a container already mounts the folder
+          '{{.State.Status}}') status "$last" ;;
           *State.Running*)
             if [[ $(status "$last") == running ]]; then echo true; else echo false; fi ;;
           *) printf '[{"Name":"%s"}]\n' "$last" ;;
@@ -192,6 +199,17 @@ case ${1-} in
     printf 'running\n' >"$s/status/$last"
     printf '%s\n' "$last"
     exit 0 ;;
+  stop)
+    # the container ends, and with it a core that podman exec started
+    if [[ ! -e $c/$last ]]; then
+      printf 'Error: no container with name or ID "%s" found: no such container\n' "$last" >&2
+      exit 125
+    fi
+    [[ ${STUB_STOP_RC:-0} == 0 ]] || { echo 'Error: stub: podman stop failed' >&2; exit "$STUB_STOP_RC"; }
+    printf 'exited\n' >"$s/status/$last"
+    rm -f -- "$s/cores/$last"
+    printf '%s\n' "$last"
+    exit 0 ;;
   top)
     # args of the container's processes: the init, sleep, and the core
     printf 'COMMAND\n/run/podman-init -- sleep infinity \nsleep infinity \n'
@@ -209,6 +227,16 @@ case ${1-} in
         [[ ${STUB_EXEC_RC:-0} == 0 ]] || exit "$STUB_EXEC_RC"
         : >"$s/cores/$ctr"
         echo fedcba9876543210fedcba9876543210
+        exit 0 ;;
+      *' hc server stop --json')
+        # pm stop: hc stops the core when one runs, as hc does
+        if [[ -n ${STUB_HCSTOP_RC-} ]]; then
+          printf '%s\n' "${STUB_HCSTOP_OUT-}" >&2
+          exit "$STUB_HCSTOP_RC"
+        fi
+        if [[ -n ${STUB_HCSTOP_OUT-} ]]; then printf '%s\n' "$STUB_HCSTOP_OUT"
+        elif [[ -e $s/cores/$ctr ]]; then rm -f -- "$s/cores/$ctr"; echo '{"stopped":true}'
+        else echo '{"stopped":false}'; fi
         exit 0 ;;
       *'/proc/[0-9]*'*)
         # pm ps: the herdr state in the container

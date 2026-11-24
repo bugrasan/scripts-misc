@@ -32,6 +32,37 @@ example() {
   podman_find -x run -d --init --userns=keep-id -v "$P:/workspaces/proj" --name pm-proj-2 "$IMG" sleep infinity
 }
 
+@test "R3: with one container, pm says how to use it or make it again, before the example" {
+  fake_container devc '' /elsewhere "$P"
+  run --separate-stderr pm run --mount "$P" "$IMG"
+  expect_status 1
+  has_line "$stderr" 'pm run: to use it, open a terminal in it with: pm bash devc'
+  has_line "$stderr" 'pm run: to make it again, remove it with: pm rm --force devc, then run pm run again'
+  # the order: the error, the hints, then the example made by hand
+  [[ $stderr == *'error the folder '*'pm run: to use it'*'pm run: to make it again'*'run podman yourself'*'  podman run '* ]] \
+    || fail "stderr: $stderr"
+  # a container that does not run is to be started
+  printf 'exited\n' >"$STUB_STATE/status/devc"
+  run --separate-stderr pm run --mount "$P" "$IMG"
+  expect_status 1
+  has_line "$stderr" 'pm run: to use it, start it with: pm start devc'
+  has_line "$stderr" 'pm run: to make it again, remove it with: pm rm --force devc, then run pm run again'
+  has_line "$stderr" "$(example "$P" proj pm-proj-2)"
+  no_create
+}
+
+@test "R3: with several containers, the same hints in general form" {
+  fake_container a '' "$P"
+  fake_container b '' "$P"
+  printf 'exited\n' >"$STUB_STATE/status/b"
+  run --separate-stderr pm run --mount "$P" "$IMG"
+  expect_status 1
+  has_line "$stderr" 'pm run: to use one of them, start it with: pm start <container>, or open a terminal in a running one with: pm bash <container>'
+  has_line "$stderr" 'pm run: to make one again, remove them all with: pm rm --force <container>, then run pm run again'
+  [[ $stderr != *'pm bash a'* && $stderr != *'pm start b'* ]] || fail "stderr: $stderr"
+  has_line "$stderr" "$(example "$P" proj pm-proj-2)"
+}
+
 @test "D23: every container that mounts the folder is named, and the given name goes into the example" {
   fake_container a '' "$P"
   fake_container b '' "$P"

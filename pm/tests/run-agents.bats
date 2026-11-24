@@ -98,3 +98,12 @@ fs() { printf '%s\n' "$STUB_STATE/fs/pm-proj$1"; }
   expect_status 0
   [[ $output == *'pm run --cc'*'copies'* ]] || fail 'readme lacks the copies'
 }
+
+@test "R1: the readme says how to check the keep-id mapping that the copies need" {
+  run pm readme
+  expect_status 0
+  [[ $output == *TROUBLESHOOTING* ]] || fail "readme: $output"
+  [[ $output == *'podman run --rm --userns=keep-id <image> id'* ]] || fail "readme: $output"
+  [[ $output == *'uid=1000(vscode)'* && $output == *'--userns=keep-id:uid=1000,gid=1000'* ]] \
+    || fail "readme: $output"
+}

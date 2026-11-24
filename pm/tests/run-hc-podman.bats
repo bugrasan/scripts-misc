@@ -132,6 +132,18 @@ hc_serve_running() {
   fail "no hc serve process in $1"
 }
 
+# term_reason <state> <name>: how the core recorded the end of terminal
+# <name>, from terminals.json below <state> (the session folder)
+term_reason() {
+  local f
+  f=$(find "$1" -name terminals.json 2>/dev/null | head -n 1)
+  [[ -n $f ]] || { find "$1" -ls >&2; return 1; }
+  python3 -I -c 'import json, sys
+for t in json.load(open(sys.argv[1]))["terminals"].values():
+    if t.get("name") == sys.argv[2]:
+        print(t.get("state"), t.get("reason"))' "$f" "$2"
+}
+
 # use_host_hc: the image's hc as this host's hc, with a core of its own:
 # XDG_STATE_HOME and HC_SOCKET below BATS_TEST_TMPDIR; XDG_RUNTIME_DIR and
 # XDG_CONFIG_HOME stay, as podman, which the core runs for the machine
@@ -471,4 +483,40 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   [ "$(ps_cell HOST-HERDR "$r")" = unavailable ] || fail "row: $r"
   r=$(real_row "$CTR2") || fail "no row for $CTR2 in: $output"
   [ "$(ps_cell CONT-HERDR "$r")" = unavailable ] || fail "row: $r"
+}
+
+@test "pm stop stops the core first, so it records how its terminals ended; pm start brings it back" {
+  run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
+  expect_status 0
+  hc_serve_running "$CTR"
+  local core_id state
+  local -a states=("$HC/$NAME"-*)
+  state=${states[0]}
+  core_id=$(running_core_id "$CTR")
+  # a live terminal just before pm stop, within the 2 s in which the core
+  # saves a change; only a core that stops by itself ends it as server_stop
+  podman exec "$CTR" hc run --bg --name pm-stop sleep 600 >/dev/null
+  run --separate-stderr pm stop "$CTR"
+  expect_status 0
+  [ "${lines[0]}" = "ok    hc core in $CTR stopped" ] || fail "output: $output"
+  [ "${lines[1]}" = "$CTR" ] || fail "output: $output"
+  [ "$(term_reason "$state" pm-stop)" = 'finished server_stop' ] \
+    || fail "terminal: $(term_reason "$state" pm-stop)"
+
+  # pm start brings the same core back
+  run --separate-stderr pm start "$CTR"
+  expect_status 0
+  has_line "$output" "ok    hc serve started in $CTR"
+  hc_serve_running "$CTR"
+  [ "$(running_core_id "$CTR")" = "$core_id" ]
+
+  # with no core running, pm stop says so, starts none, and stops anyway
+  podman exec "$CTR" hc server stop >/dev/null
+  touch -- "$BATS_TEST_TMPDIR/before-stop"
+  run --separate-stderr pm stop "$CTR"
+  expect_status 0
+  [ "$output" = $'skip  hc core in '"$CTR"$': none running\n'"$CTR" ] || fail "output: $output"
+  [ -z "$(find "$state" -name core.lock -newer "$BATS_TEST_TMPDIR/before-stop")" ] \
+    || fail 'hc server stop started a core'
+  [ "$(podman container inspect --format '{{.State.Status}}' -- "$CTR")" = exited ]
 }

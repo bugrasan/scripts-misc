@@ -415,6 +415,25 @@ _pm_mount_users() {
   done < <(podman container inspect --format "{{.Name}}$us{{range .Mounts}}{{.Source}}$rs{{end}}" $ids 2>/dev/null)
 }
 
+# how to use, or make again, the containers $1 (one name per line) that
+# mount the folder of a refused pm run, on stderr: for one container by its
+# name and state, for several in general form
+_pm_folder_hint() {
+  local c=$1
+  if [[ $c == *$'\n'* ]]; then
+    printf '%s\n' >&2 \
+      'pm run: to use one of them, start it with: pm start <container>, or open a terminal in a running one with: pm bash <container>' \
+      'pm run: to make one again, remove them all with: pm rm --force <container>, then run pm run again'
+    return 0
+  fi
+  if [[ $(podman container inspect --format '{{.State.Status}}' -- "$c" 2>/dev/null) == running ]]; then
+    printf 'pm run: to use it, open a terminal in it with: pm bash %s\n' "$c" >&2
+  else
+    printf 'pm run: to use it, start it with: pm start %s\n' "$c" >&2
+  fi
+  printf 'pm run: to make it again, remove it with: pm rm --force %s, then run pm run again\n' "$c" >&2
+}
+
 # ------------------------------------------------------------------ pm run
 
 pm_run() {
@@ -445,9 +464,10 @@ pm_run() {
 one container per folder:
   pm creates no second container for <dir>: when a podman container
   already mounts it, or with --hc its herdr-core state folder, pm stops
-  with an error and shows a podman run line that makes one by hand; pm
-  sees only podman containers, not those of other engines such as Docker,
-  and compares paths as spelled
+  with an error, says how to use that container (pm start, pm bash) or
+  make it again (pm rm --force, then pm run), and shows a podman run line
+  that makes a second one by hand; pm sees only podman containers, not
+  those of other engines such as Docker, and compares paths as spelled
 
 network isolation:
   with --mount or --net, the container joins a bridge network created with
@@ -478,9 +498,10 @@ herdr-core:
   another, and only notes when hc is not on PATH; the hc machine ls it
   runs first starts the core on this host when none runs
   the label pm-hc=<container-name> marks the container: pm start starts
-  its core again, and pm rm removes its hc machine; podman sets labels
-  only at creation, so containers made without --hc or by an older pm get
-  no herdr-core handling until made again with pm run --hc
+  its core again, pm stop stops it first, and pm rm removes its hc
+  machine; podman sets labels only at creation, so containers made without
+  --hc or by an older pm get no herdr-core handling until made again with
+  pm run --hc
   pm keeps the id file and the state folder on rollback and on pm rm
 
 runs: podman network create -o isolate=strict --label pm-script=$PM_VERSION <network>
@@ -617,6 +638,7 @@ then: pm bash <container-name>"
     mounted=$(_pm_mount_users "${paths[@]}") || { _pm_err 'cannot list the podman containers'; return 1; }
     if [[ -n $mounted ]]; then
       _pm_err "the folder $abs${hcstate:+ or its herdr-core state folder} is already mounted by: ${mounted//$'\n'/, }; pm does not support a second container on the same folder, for consistency reasons"
+      _pm_folder_hint "$mounted"
       printf '%s\n' "pm run: to create one anyway, run podman yourself; this example has one mount, podman's default network, and no herdr-core:" >&2
       printf '  podman run -d --init --userns=keep-id -v %q --name %q %q sleep infinity\n' \
         "$abs:/workspaces/$base" "$name-2" "$image" >&2
@@ -724,14 +746,49 @@ note: containers keep the labels, mounts, and secrets they were created
   [[ $hcname == '""' ]] || _pm_hc_serve "$1"
 }
 
+# stop the core in running container $1 before podman stop, which signals
+# only sleep infinity: a core that podman exec started dies with the
+# container and loses the changes of its last 2 s; hc server stop waits
+# for the core to end and never starts one; an ok line, else a skip line
+_pm_hc_stop() {
+  local out rc=0
+  out=$(podman exec -- "$1" hc server stop --json </dev/null 2>&1) || rc=$?
+  if (( rc == 0 )) && [[ $out == *'"stopped":true'* ]]; then
+    _pm_ok "hc core in $1 stopped"
+  elif (( rc == 0 )) && [[ $out == *'"stopped":false'* ]]; then
+    _pm_skip "hc core in $1: none running"
+  else
+    _pm_skip "hc core in $1: hc server stop failed${out:+: ${out//$'\n'/ }}"
+  fi
+}
+
 pm_stop() {
   local help='usage: pm stop <container>
 
   <container>  container to stop; completion lists running containers
 
-runs: podman stop <container>'
+for a running container made with pm run --hc (label pm-hc), pm first
+stops its core with hc server stop, so the core saves its state: podman
+stop signals only sleep infinity, and a core started by podman exec would
+die with the container and lose the changes of its last 2 s; a core stop
+that finds no core or fails is a skip line, and podman stop runs anyway
+
+runs: for a running container made with pm run --hc (label pm-hc), first:
+      podman exec <container> hc server stop --json
+      then: podman stop <container>'
+  local out label state
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
   if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
+  # the core of a pm run --hc container first; nothing here keeps podman
+  # stop from running, and podman reports a container it cannot find
+  if out=$(podman container inspect --format \
+    '{{json (index .Config.Labels "pm-hc")}}'$'\x1f''{{.State.Status}}' -- "$1" 2>/dev/null); then
+    IFS=$'\x1f' read -r label state <<<"$out"
+    if [[ $label != '""' ]]; then
+      if [[ $state == running ]]; then _pm_hc_stop "$1"
+      else _pm_skip "hc core in $1: container is $state"; fi
+    fi
+  fi
   podman stop -- "$1"
 }
 
@@ -1974,7 +2031,7 @@ pm_usage() {
     '' \
     '  run        [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]' \
     '  start      <container>    and hc serve for a pm run --hc container' \
-    '  stop       <container>' \
+    '  stop       <container>    after hc server stop for a pm run --hc container' \
     '  bash       <container>    interactive bash terminal in a running container' \
     '  rm         [--force] <container>  remove it, its pm network once unused, and its hc machine' \
     '  ps         [-a] [--agents] | <container> | labels|mounts|ns|id [<container>]' \
@@ -2063,10 +2120,12 @@ ONE CONTAINER PER FOLDER
 
   pm creates no second container for a folder: when a podman container
   already mounts the --mount folder, or with --hc its herdr-core state
-  folder, pm stops with an error and shows a podman run line that makes
-  one by hand, with one mount, podman's default network, and no herdr-core.
-  pm sees only podman containers, not those of other engines such as a dev
-  container under Docker, and compares paths as spelled.
+  folder, pm stops with an error and says how to use that container (pm
+  start, pm bash) or make it again (pm rm --force, then pm run). It also
+  shows a podman run line that makes one by hand, with one mount, podman's
+  default network, and no herdr-core. pm sees only podman containers, not
+  those of other engines such as a dev container under Docker, and
+  compares paths as spelled.
 
 GIT WORKTREES
 
@@ -2104,7 +2163,8 @@ HERDR-CORE
     ~/.config/herdr-core/container/myapp-<sha256 of the id>
 
   Such a container carries the label pm-hc=<container>: pm start starts its
-  core again, and pm rm removes its hc machine. podman sets labels only
+  core again, pm stop stops it first with hc server stop, so that it saves
+  its state, and pm rm removes its hc machine. podman sets labels only
   when it creates a container, so a container made without --hc or by an
   older pm gets none of this; make it again with pm run --hc. Without hc on
   PATH, pm adds no machine and says so. pm hc-add <container> adds the
@@ -2132,6 +2192,17 @@ INSPECT
   pm ps pm-myapp          full inspect JSON
   pm ps labels pm-myapp   labels; also mounts, ns, and id
   pm ps labels            labels of all containers
+
+TROUBLESHOOTING
+
+  Writing below /home/vscode (the copies of --cc and --cp, agents that keep
+  their settings there) fails when keep-id does not map your user to vscode
+  (UID 1000). Check with:
+
+  podman run --rm --userns=keep-id <image> id
+
+  If it does not print uid=1000(vscode), the fix candidate is
+  --userns=keep-id:uid=1000,gid=1000 in place of --userns=keep-id.
 
 CONFIGURATION (environment variable and current value)
 
