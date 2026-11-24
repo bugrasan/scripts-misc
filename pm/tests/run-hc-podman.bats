@@ -255,6 +255,9 @@ hc_serve_shell() {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG" "$CTR2"
   expect_status 1
   has_line "$stderr" "error the folder $DIR or its herdr-core state folder is already mounted by: $CTR; pm does not support a second container on the same folder, for consistency reasons"
+  # the container runs: pm bash uses it, pm rm --force and pm run remake it
+  has_line "$stderr" "pm run: to use it, open a terminal in it with: pm bash $CTR"
+  has_line "$stderr" "pm run: to make it again, remove it with: pm rm --force $CTR, then run pm run again"
   local err=$stderr line
   run podman container exists -- "$CTR2"
   [ "$status" -ne 0 ]
