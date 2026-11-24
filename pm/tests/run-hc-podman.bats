@@ -181,6 +181,21 @@ for m in json.load(sys.stdin)["machines"]:
         print(m["target"], m["via"])' "$1"
 }
 
+# host_connected <name>: wait up to 30 s until hc here holds a line to
+# that machine (state connected in hc machine ls --json)
+host_connected() {
+  local i
+  for (( i = 0; i < 60; i++ )); do
+    [[ $(hc machine ls --json | python3 -I -c 'import json, sys
+for m in json.load(sys.stdin)["machines"]:
+    if m["name"] == sys.argv[1]:
+        print(m["state"])' "$1") != connected ]] || return 0
+    sleep 0.5
+  done
+  hc machine ls --json >&2 || true
+  fail "hc here holds no line to $1"
+}
+
 # core_shell <container>: SHELL in the environment of the running core,
 # from /proc/<pid>/environ inside the container
 core_shell() {
@@ -589,4 +604,26 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   expect_status 0
   [ "$(podman exec "$CTR" cat /home/vscode/.config/herdr-core/config.toml)" = "shell = [\"$sh\"]" ]
   [ "$(bare_agent "$CTR")" = "${sh##*/}" ] || fail "a bare hc run --bg starts: $(bare_agent "$CTR")"
+}
+
+@test "pm stop with hc here connected: the core stop ends the container at once, so no new core starts" {
+  use_host_hc
+  run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
+  expect_status 0
+  has_line "$output" "ok    hc machine $CTR added"
+  local state
+  local -a states=("$HC/$NAME"-*)
+  state=${states[0]}
+  # the add's connection started the core, and hc here holds the line
+  core_running "$CTR"
+  host_connected "$CTR"
+  touch -- "$BATS_TEST_TMPDIR/before-stop"
+  run --separate-stderr pm stop "$CTR"
+  expect_status 0
+  [ "$output" = "ok    hc core in $CTR stopped"$'\n'"$CTR" ] || fail "output: $output"
+  # hc here dials again as soon as the core ends; its connection would
+  # start a core, which rewrites core.lock, had the container still run
+  [ -z "$(find "$state" -name core.lock -newer "$BATS_TEST_TMPDIR/before-stop")" ] \
+    || fail "a core started after the core stop: $(find "$state" -name core.lock -ls)"
+  [ "$(podman container inspect --format '{{.State.Status}}' -- "$CTR")" = exited ]
 }

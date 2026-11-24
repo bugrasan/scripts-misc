@@ -323,10 +323,17 @@ _pm_hc_config() {
 # how hc's machine list $1 (hc machine ls --json: compact, flat objects,
 # no bare quote inside a string) knows machine $2: return 0 with the
 # connection command $3, 3 with pm's through another podman path (a via
-# target that ends in " exec -i $2 sh -c"), 1 with another, 2 not at all
+# target "<path> exec -i $2 sh -c" with an absolute path that ends in
+# /podman), 1 with another, 2 not at all
 _pm_hc_entry() {
-  local s=$1 obj n t LC_ALL=C re='\{("([^"\\]|\\.)*"|[^"{}])*\}'
-  local tre='"target":"(([^"\\]|\\.)*)"[,}]'
+  local s=$1 obj n t p LC_ALL=C re='\{("([^"\\]|\\.)*"|[^"{}])*\}'
+  local tre='"target":"(([^"\\]|\\.)*)"[,}]' q="'" b=\\\\
+  # that path as hc's JSON holds it (\\ for \): bare, of pm's letters and
+  # spaces, none before a / (an unquoted path, not sudo /usr/bin/podman),
+  # or single-quoted as _pm_hc_via quotes it, so no other command such as
+  # docker, sudo podman, or ssh box podman comes before exec -i
+  local bare='^/(([-[:alnum:]/._+]| [-[:alnum:]._+])*/)?podman$'
+  local quoted="^$q/(([^$q$b]|$b.|$q$b$b$q$q)*/)?podman$q\$"
   n="\"name\":$(_pm_json_str "$2")" t="\"target\":$(_pm_json_str "$3")"
   while [[ $s =~ $re ]]; do
     obj=${BASH_REMATCH[0]}
@@ -334,7 +341,9 @@ _pm_hc_entry() {
     [[ $obj == *"$n"[,\}]* ]] || continue
     [[ $obj == *'"via":true'[,\}]* ]] || return 1
     [[ $obj == *"$t"[,\}]* ]] && return 0
-    [[ $obj =~ $tre && ${BASH_REMATCH[1]} == ?*" exec -i $2 sh -c" ]] && return 3
+    [[ $obj =~ $tre && ${BASH_REMATCH[1]} == *" exec -i $2 sh -c" ]] || return 1
+    p=${BASH_REMATCH[1]%" exec -i $2 sh -c"}
+    [[ $p =~ $bare || $p =~ $quoted ]] && return 3
     return 1
   done
   return 2
@@ -786,8 +795,14 @@ note: pm starts no herdr-core core; in a container made with pm run --hc,
 # for the core to end and never starts one; an ok line, else a skip line
 _pm_hc_stop() {
   local out rc=0
-  out=$(podman exec -- "$1" hc server stop --json </dev/null 2>&1) || rc=$?
-  if (( rc == 0 )) && [[ $out == *'"stopped":true'* ]]; then
+  # once hc stopped a core, the same exec ends the init (pid 1, the
+  # container user's under keep-id): hc on this host dials again at once,
+  # and its connection would start a core that podman stop then kills; the
+  # exec can die with the init, so hc's answer counts, not the status
+  out=$(podman exec -- "$1" sh -c 'o=$(hc server stop --json 2>&1); r=$?
+    [ -z "$o" ] || printf "%s\n" "$o"; [ "$r" = 0 ] || exit "$r"
+    case $o in *"\"stopped\":true"*) kill 1 ;; esac' </dev/null 2>&1) || rc=$?
+  if [[ $out == *'"stopped":true'* ]]; then
     _pm_ok "hc core in $1 stopped"
   elif (( rc == 0 )) && [[ $out == *'"stopped":false'* ]]; then
     _pm_skip "hc core in $1: none running"
@@ -804,11 +819,15 @@ pm_stop() {
 for a running container made with pm run --hc (label pm-hc), pm first
 stops its core with hc server stop, so the core saves its state: podman
 stop signals only sleep infinity, and a core started by podman exec would
-die with the container and lose the changes of its last 2 s; a core stop
-that finds no core or fails is a skip line, and podman stop runs anyway
+die with the container and lose the changes of its last 2 s; once the
+core stopped, the same podman exec ends the container (kill 1 for its
+init), as hc on this host dials again at once and would start a new core
+there; a core stop that finds no core or fails is a skip line, and podman
+stop runs anyway
 
 runs: for a running container made with pm run --hc (label pm-hc), first:
-      podman exec <container> hc server stop --json
+      hc server stop --json, then kill 1 when it stopped a core,
+        by podman exec <container> sh -c ...
       then: podman stop <container>'
   local out label state
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
@@ -2217,19 +2236,23 @@ HERDR-CORE
     ~/.config/herdr-core/container/myapp-<sha256 of the id>
 
   Such a container carries the label pm-hc=<container>: pm stop stops its
-  core first with hc server stop, so that it saves its state, and pm rm
-  removes its hc machine. podman sets labels only
-  when it creates a container, so a container made without --hc or by an
-  older pm gets none of this; make it again with pm run --hc. Without hc on
-  PATH, pm adds no machine and says so. pm hc-add <container> adds the
-  machine later, for example once hc is installed, and pm hc-rm <container>
-  removes it and keeps the container. Like pm run --hc and pm rm, both run
-  hc machine ls first, which starts the hc core on this host when none
-  runs; pm ps never starts one and shows HOST-HERDR stopped instead.
+  core first with hc server stop, so that it saves its state, and ends the
+  container in the same podman exec, before hc on this host connects again
+  and starts a new core there; pm rm removes its hc machine. podman sets
+  labels only when it creates a container, so a container made without --hc
+  or by an older pm gets none of this; make it again with pm run --hc.
+  Without hc on PATH, pm adds no machine and says so. pm hc-add <container>
+  adds the machine later, for example once hc is installed, and pm hc-rm
+  <container> removes it and keeps the container. Like pm run --hc and pm
+  rm, both run hc machine ls first, which starts the hc core on this host
+  when none runs; pm ps never starts one and shows HOST-HERDR stopped
+  instead.
   A machine that reaches the container through another podman path, as
   after podman moved, is still pm's: pm rm and pm hc-rm remove it, pm run
   --hc and pm hc-add replace it with a note, and pm ps shows HOST-HERDR no
-  until pm hc-add repairs it.
+  until pm hc-add repairs it. That path is absolute and ends in /podman;
+  with another command first, such as sudo podman or ssh box podman, the
+  machine is not pm's.
 
   To start over, delete the id file and the state folder. The dev container
   and a pm container of one project share the identity and the state, so

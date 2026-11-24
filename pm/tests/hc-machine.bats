@@ -137,7 +137,8 @@ stale() { hc_machine "$1" "$2 exec -i $1 sh -c"; }
 
 @test "M10: pm's machine through another podman path is stale: pm run --hc replaces it, with a note" {
   local old s
-  for old in /usr/local/bin/podman "'/Applications/Podman Desktop/podman'" '/opt/my tools/podman'; do
+  for old in /usr/local/bin/podman "'/Applications/Podman Desktop/podman'" '/opt/my tools/podman' \
+    "'/it'\\''s \"new\"/podman'"; do
     forget_containers
     : >"$HC_LOG"
     FAKE_HC_LS=$(machines "$(stale pm-proj "$old")") run --separate-stderr pm run --hc --mount "$P" "$IMG"
@@ -176,6 +177,29 @@ stale() { hc_machine "$1" "$2 exec -i $1 sh -c"; }
     expect_status 1
     has_line "$stderr" 'error pm-proj: hc already has a machine pm-proj with another connection; see hc machine ls'
     if hc_find machine rm || hc_find machine add; then hc_show; fail "pm changed hc for: $t"; fi
+  done
+}
+
+@test "FR1-02: another command before exec -i is not pm's: pm run --hc and pm rm leave the machine alone" {
+  local p t
+  # only an absolute path to podman, as pm writes it, may come first
+  for p in docker 'ssh box podman' 'sudo podman' '/usr/bin/sudo /usr/bin/podman' \
+    /usr/bin/docker; do
+    t="$p exec -i pm-proj sh -c"
+    forget_containers
+    : >"$HC_LOG"
+    FAKE_HC_LS=$(machines "$(hc_machine pm-proj "$t")") \
+      run --separate-stderr pm run --hc --mount "$P" "$IMG"
+    expect_status 1
+    has_line "$stderr" 'error pm-proj: hc already has a machine pm-proj with another connection; see hc machine ls'
+    if hc_find machine rm || hc_find machine add; then hc_show; fail "pm changed hc for: $t"; fi
+    # pm rm keeps it, with a skip line
+    : >"$HC_LOG"
+    FAKE_HC_LS=$(machines "$(hc_machine pm-proj "$t")") \
+      run --separate-stderr pm rm --force pm-proj
+    expect_status 0
+    has_line "$output" 'skip  hc machine pm-proj: another connection; kept'
+    if hc_find machine rm; then hc_show; fail "pm rm removed: $t"; fi
   done
 }
 

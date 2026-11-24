@@ -17,7 +17,8 @@
 #   nosha/<name>       present when it has no sha256sum
 #   fs/<name>/...      its files, from podman cp
 #   cbin/<name>        the PATH of its sha256 script
-# and networks/<name> per fake network
+# and networks/<name> per fake network, and kill.log: each kill in pm's
+# core stop script, as "<container> <arguments>"
 # settings, all optional:
 #   STUB_PODMAN_VERSION version that --version reports (default 6.2.0)
 #   STUB_SECRETS        names of the podman secrets that exist
@@ -31,6 +32,8 @@
 #                       prints STUB_HCSTOP_OUT to stderr
 #   STUB_HCSTOP_OUT     without STUB_HCSTOP_RC: what it prints instead of
 #                       {"stopped":true} or {"stopped":false}
+#   STUB_KILL_RC        exit status of kill in pm's core stop script, which
+#                       then prints an error and ends nothing
 #   STUB_CP_RC          exit status of `cp` (default 0)
 #   STUB_NET_CREATE_RC  exit status of `network create` (default 0)
 #   STUB_STATUS         state of containers without a status file
@@ -235,16 +238,41 @@ case ${1-} in
         done
         "${STUB_SH:?}" -c "$script" sh "$s/fs/$ctr$last"
         exit ;;
-      *' hc server stop --json')
-        # pm stop: hc stops the core when one runs, as hc does
-        if [[ -n ${STUB_HCSTOP_RC-} ]]; then
-          printf '%s\n' "${STUB_HCSTOP_OUT-}" >&2
-          exit "$STUB_HCSTOP_RC"
-        fi
-        if [[ -n ${STUB_HCSTOP_OUT-} ]]; then printf '%s\n' "$STUB_HCSTOP_OUT"
-        elif [[ -e $s/cores/$ctr ]]; then rm -f -- "$s/cores/$ctr"; echo '{"stopped":true}'
-        else echo '{"stopped":false}'; fi
-        exit 0 ;;
+      *'hc server stop --json'*)
+        # pm stop: pm's own script, with sh functions for hc, which stops
+        # the core when one runs, as hc does, and for kill, which logs its
+        # arguments; kill 1 ends the init, so the container stops and the
+        # exec dies with it (137), as podman's can
+        for (( i = 0; i < ${#args[@]}; i++ )); do
+          [[ ${args[i]} != -c ]] || script=${args[i+1]}
+        done
+        fakes=$(cat <<'EOF'
+hc() {
+  [ "$*" = 'server stop --json' ] || { echo "stub: hc $*" >&2; return 98; }
+  if [ -n "${STUB_HCSTOP_RC-}" ]; then
+    printf '%s\n' "${STUB_HCSTOP_OUT-}" >&2
+    return "$STUB_HCSTOP_RC"
+  fi
+  if [ -n "${STUB_HCSTOP_OUT-}" ]; then printf '%s\n' "$STUB_HCSTOP_OUT"
+  elif [ -e "$STUB_CORE" ]; then rm -f -- "$STUB_CORE"; echo '{"stopped":true}'
+  else echo '{"stopped":false}'; fi
+}
+kill() {
+  printf '%s %s\n' "$STUB_CTR" "$*" >>"$STUB_KILL_LOG"
+  if [ -n "${STUB_KILL_RC-}" ]; then
+    echo 'sh: kill: (1) - Operation not permitted' >&2
+    return "$STUB_KILL_RC"
+  fi
+  [ "$*" = 1 ] || return 0
+  echo exited >"$STUB_CSTATUS"
+  rm -f -- "$STUB_CORE"
+  exit 137
+}
+EOF
+)
+        STUB_CTR=$ctr STUB_CORE=$s/cores/$ctr STUB_CSTATUS=$s/status/$ctr \
+          STUB_KILL_LOG=$s/kill.log "${STUB_SH:?}" -c "$fakes"$'\n'"$script"
+        exit ;;
       *'/proc/[0-9]*'*)
         # pm ps: the herdr state in the container
         track 1
