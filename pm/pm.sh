@@ -1038,21 +1038,25 @@ _pm_doctor_git() {
   else _pm_check 1 'git not found'; fi
 }
 
-# the host's hc core, found among this user's processes, as hc server
-# status would start one: hc serve, or on macOS <exe> --hc-launchd <socket>
-# from launchd; on Linux, a process in another pid namespace is the core of
-# a container, whose processes the host lists as well
-_pm_doctor_core() {
+# true when the host's hc core runs, found among this user's processes, as
+# hc server status would start one: hc serve, or on macOS <exe>
+# --hc-launchd <socket> from launchd; on Linux, a process in another pid
+# namespace is the core of a container, whose processes the host lists too
+_pm_host_core_running() {
   local pid args own re='(^|/)(hc|herdr-core) (serve|--hc-launchd)( |$)'
   own=$(readlink "/proc/$$/ns/pid" 2>/dev/null)
   while read -r pid args; do
     [[ $args =~ $re ]] || continue
     if [[ -z $own || $(readlink "/proc/$pid/ns/pid" 2>/dev/null) == "$own" ]]; then
-      _pm_check 0 'hc core running'
-      return
+      return 0
     fi
   done < <(ps -U "$(id -u)" -o pid= -o args= 2>/dev/null)
-  _pm_check 1 'hc core not running (starts on first hc use)'
+  return 1
+}
+
+_pm_doctor_core() {
+  if _pm_host_core_running; then _pm_check 0 'hc core running'
+  else _pm_check 1 'hc core not running (starts on first hc use)'; fi
 }
 
 pm_doctor() {
@@ -1159,40 +1163,74 @@ _pm_ps_table() {
   done
 }
 
-# EXPERIMENTAL: CONT-HERDR and HOST-HERDR for the rows of _pm_ps_table,
-# filled into its r_cont and r_host (bash's dynamic scope): one podman exec
-# per running container looks for the core and for hc, and one hc machine
-# ls covers all rows; it starts the host's core when none runs
-_pm_ps_herdr() {
-  local i m via ls='' hc=0 fd
-  local -a fds=()
-  (( ${#r_id[@]} )) || return 0
-  # a failing hc machine ls counts as no hc: unavailable, not no
-  if command -v hc >/dev/null 2>&1 && ls=$(hc machine ls --json 2>/dev/null); then hc=1; fi
-  # in each running container at once: an hc serve process in /proc, else
-  # hc there or not; $s keeps the script's own command line from matching
+# run `sh -c <script> sh <args>` by podman exec in every running container
+# of _pm_ps_table's rows (r_id, r_status; bash's dynamic scope), at most
+# limit at a time, and read the outputs in row order into the array named
+# $1, trailing newlines dropped; a container whose exec fails to start gets
+# an empty entry, never another container's output
+_pm_ps_execs() {
+  local -n _pm_outs=$1
+  local -r limit=5
+  local script=$2 i j k fd v
+  local -a run=() fds=()
+  shift 2
   for (( i = 0; i < ${#r_id[@]}; i++ )); do
-    [[ ${r_status[i]} == running ]] || continue
-    exec {fd}< <(podman exec -- "${r_id[i]}" sh -c 's=serve
-      for p in /proc/[0-9]*; do
-        c=$(tr "\000" " " <"$p/cmdline" 2>/dev/null) || continue
-        case $c in "hc $s "*|*"/hc $s "*|"herdr-core $s "*|*"/herdr-core $s "*)
-          echo running; exit ;; esac
-      done
-      if command -v hc >/dev/null || command -v herdr-core >/dev/null; then echo stopped
-      else echo unavailable; fi' 2>/dev/null </dev/null)
-    fds[i]=$fd
+    [[ ${r_status[i]} != running ]] || run+=("$i")
   done
+  for (( j = 0; j < ${#run[@]}; j += limit )); do
+    # start up to limit execs, then read them in order; fd is reset first,
+    # as a failed exec {fd}< keeps the old number
+    for (( k = j; k < j + limit && k < ${#run[@]}; k++ )); do
+      fd=''
+      { exec {fd}< <(podman exec -- "${r_id[run[k]]}" sh -c "$script" sh "$@" \
+        2>/dev/null </dev/null); } 2>/dev/null || fd=''
+      fds[k]=$fd
+    done
+    for (( k = j; k < j + limit && k < ${#run[@]}; k++ )); do
+      v=''
+      if [[ -n ${fds[k]} ]]; then
+        fd=${fds[k]}
+        IFS= read -r -d '' v <&"$fd"
+        exec {fd}<&-
+      fi
+      _pm_outs[run[k]]=${v%"${v##*[!$'\n']}"}
+    done
+  done
+}
+
+# EXPERIMENTAL: CONT-HERDR and HOST-HERDR for the rows of _pm_ps_table,
+# into its r_cont and r_host: one podman exec per running container looks
+# for the core and for hc; hc machine ls covers all rows, but only while
+# the host's core runs, as it would start one: else HOST-HERDR is stopped
+_pm_ps_herdr() {
+  local i m via ls='' host=unavailable
+  local -a outs=()
+  (( ${#r_id[@]} )) || return 0
+  # unavailable without hc or when the list fails
+  if command -v hc >/dev/null 2>&1; then
+    if ! _pm_host_core_running; then host=stopped
+    elif ls=$(hc machine ls --json 2>/dev/null); then host=list; fi
+  fi
+  # in the container: an hc serve process in /proc, else hc there or not;
+  # $s keeps the script's own command line from matching
+  _pm_ps_execs outs 's=serve
+    for p in /proc/[0-9]*; do
+      c=$(tr "\000" " " <"$p/cmdline" 2>/dev/null) || continue
+      case $c in "hc $s "*|*"/hc $s "*|"herdr-core $s "*|*"/herdr-core $s "*)
+        echo running; exit ;; esac
+    done
+    if command -v hc >/dev/null || command -v herdr-core >/dev/null; then echo stopped
+    else echo unavailable; fi'
   for (( i = 0; i < ${#r_id[@]}; i++ )); do
     r_cont[i]=stopped
-    if [[ -n ${fds[i]-} ]]; then
-      fd=${fds[i]}
-      IFS= read -r 'r_cont[i]' <&"$fd" || r_cont[i]=''
-      exec {fd}<&-
-      case ${r_cont[i]} in running|stopped|unavailable) ;; *) r_cont[i]=unavailable ;; esac
+    if [[ ${r_status[i]} == running ]]; then
+      case ${outs[i]-} in
+        running|stopped|unavailable) r_cont[i]=${outs[i]} ;;
+        *)                           r_cont[i]=unavailable ;;
+      esac
     fi
     # on the host: the machine pm adds for it, named by the pm-hc label
-    if (( ! hc )); then r_host[i]=unavailable; continue; fi
+    if [[ $host != list ]]; then r_host[i]=$host; continue; fi
     m=${r_hc[i]:-${r_name[i]}}
     if via=$(_pm_hc_via "$m") && _pm_hc_entry "$ls" "$m" "$via"; then r_host[i]=yes
     else r_host[i]=no; fi
@@ -1226,33 +1264,27 @@ _pm_has_secret() {
 # the files by one podman exec per running container that hashes all four
 # with its sha256sum (none: n/a), one line per file; the host files once
 _pm_ps_agents() {
-  local i hmd hcs hps sum fd
-  local -a sums fds=()
+  local i hmd hcs hps line
+  local -a outs=() sums
   hmd=$(_pm_file_sha256 "$PM_CLAUDE_MD")
   hcs=$(_pm_file_sha256 "$PM_CLAUDE_SETTINGS")
   hps=$(_pm_file_sha256 "$PM_COPILOT_SETTINGS")
-  # the execs of all running containers at once, read in order below
-  for (( i = 0; i < ${#r_id[@]}; i++ )); do
-    [[ ${r_status[i]} == running ]] || continue
-    exec {fd}< <(podman exec -- "${r_id[i]}" sh -c \
-      'command -v sha256sum >/dev/null || exit 3
-       for f; do
-         if [ -f "$f" ]; then sha256sum <"$f" 2>/dev/null || echo -; else echo -; fi
-       done' sh \
-      /home/vscode/.claude/CLAUDE.md /home/vscode/.claude/settings.json \
-      /home/vscode/.copilot/copilot-instructions.md /home/vscode/.copilot/settings.json \
-      2>/dev/null </dev/null)
-    fds[i]=$fd
-  done
+  _pm_ps_execs outs 'command -v sha256sum >/dev/null || exit 3
+    for f; do
+      if [ -f "$f" ]; then sha256sum <"$f" 2>/dev/null || echo -; else echo -; fi
+    done' \
+    /home/vscode/.claude/CLAUDE.md /home/vscode/.claude/settings.json \
+    /home/vscode/.copilot/copilot-instructions.md /home/vscode/.copilot/settings.json
   for (( i = 0; i < ${#r_id[@]}; i++ )); do
     r_scc[i]=no r_scp[i]=no
     if _pm_has_secret "${r_cmd[i]}" "${r_sec[i]}" "$PM_CC_SECRET"; then r_scc[i]=yes; fi
     if _pm_has_secret "${r_cmd[i]}" "${r_sec[i]}" "$PM_CP_SECRET"; then r_scp[i]=yes; fi
     if [[ ${r_status[i]} != running ]]; then r_ccc[i]=stopped r_ccp[i]=stopped; continue; fi
+    # one line per file: its hash first, or - for none
     sums=()
-    fd=${fds[i]}
-    while read -r sum _; do sums+=("$sum"); done <&"$fd"
-    exec {fd}<&-
+    if [[ -n ${outs[i]-} ]]; then
+      while IFS= read -r line; do sums+=("${line%% *}"); done <<<"${outs[i]}"
+    fi
     r_ccc[i]=$(_pm_same "$hmd" "${sums[0]-}"),$(_pm_same "$hcs" "${sums[1]-}")
     r_ccp[i]=$(_pm_same "$hmd" "${sums[2]-}"),$(_pm_same "$hps" "${sums[3]-}")
     (( ${#r_ccc[i]} > cw )) && cw=${#r_ccc[i]}
@@ -1294,11 +1326,11 @@ table columns:
   CONT-HERDR  experimental: running when an hc serve or herdr-core serve
               process runs in the container, stopped when it has hc but no
               core or does not run, unavailable when it runs without hc;
-              one podman exec per running container
+              one podman exec per running container, at most 5 at a time
   HOST-HERDR  experimental: yes when hc on this host has the machine that
-              pm adds for it, no when not, unavailable without hc here or
-              when hc machine ls fails; that hc machine ls starts the core
-              on this host when none runs
+              pm adds for it, no when not, stopped when no hc core runs on
+              this host (pm then does not ask hc, so pm ps never starts a
+              core), unavailable without hc here or when hc machine ls fails
   PROJECT     label devcontainer.local_folder, else the host folder mounted
               at /workspaces/<foldername>
 
@@ -1312,7 +1344,8 @@ table columns:
               ~/.copilot/settings.json against PM_COPILOT_SETTINGS
   each state is identical, differ, or n/a (a file is missing on a side,
   or the container has no sha256sum), or stopped when the container does
-  not run; one podman exec per running container hashes its four files
+  not run; one podman exec per running container, at most 5 at a time,
+  hashes its four files
 
 needs: jq for every view except the tables
 note: a container named labels, mounts, ns, or id cannot be shown with
@@ -2074,8 +2107,9 @@ HERDR-CORE
   older pm gets none of this; make it again with pm run --hc. Without hc on
   PATH, pm adds no machine and says so. pm hc-add <container> adds the
   machine later, for example once hc is installed, and pm hc-rm <container>
-  removes it and keeps the container. The hc machine ls that pm runs first
-  starts the hc core on this host when none runs.
+  removes it and keeps the container. Like pm run --hc and pm rm, both run
+  hc machine ls first, which starts the hc core on this host when none
+  runs; pm ps never starts one and shows HOST-HERDR stopped instead.
 
   To start over, delete the id file and the state folder. The dev container
   and a pm container of one project share the identity and the state, so

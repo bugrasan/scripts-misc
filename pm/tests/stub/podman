@@ -28,6 +28,8 @@
 #   STUB_CP_RC          exit status of `cp` (default 0)
 #   STUB_NET_CREATE_RC  exit status of `network create` (default 0)
 #   STUB_STATUS         state of containers without a status file
+#   STUB_EXEC_DELAY     seconds each exec of pm ps takes (default 0); the
+#                       peak of those running at once lands in execs.max
 #   STUB_IMAGES, STUB_NETWORKS, STUB_PS
 #                       lines `image list`, `network ls`, and `ps` (without
 #                       -q or a pm-hc label filter) print
@@ -45,6 +47,17 @@ us=$'\x1f' rs=$'\x1e'
 status() { if [[ -e $s/status/$1 ]]; then cat -- "$s/status/$1"; else printf '%s\n' "${STUB_STATUS:-running}"; fi; }
 # val <dir> <name>: the content of a state file, or nothing
 val() { [[ ! -e $s/$1/$2 ]] || cat -- "$s/$1/$2"; }
+# track <1|-1>: count the execs of pm ps that run at once, under a lock
+# made by mkdir (portable, unlike flock), and keep the peak in execs.max
+track() {
+  local n m
+  until mkdir -- "$s/execs.lock" 2>/dev/null; do sleep 0.01; done
+  n=$(( $(cat -- "$s/execs.run" 2>/dev/null || echo 0) + $1 ))
+  m=$(cat -- "$s/execs.max" 2>/dev/null || echo 0)
+  printf '%s\n' "$n" >"$s/execs.run"
+  (( n <= m )) || printf '%s\n' "$n" >"$s/execs.max"
+  rmdir -- "$s/execs.lock"
+}
 # jlabel <name>: its pm-hc label as podman's json prints it
 jlabel() { printf '"%s"' "$(val labels "$1")"; }
 # jcreate <name>: its create command as podman's json prints it
@@ -195,9 +208,12 @@ case ${1-} in
         exit 0 ;;
       *'/proc/[0-9]*'*)
         # pm ps: the herdr state in the container
+        track 1
+        sleep "${STUB_EXEC_DELAY:-0}"
         if [[ -e $s/cores/$ctr ]]; then echo running
         elif [[ -e $s/nohc/$ctr ]]; then echo unavailable
         else echo stopped; fi
+        track -1
         exit 0 ;;
       *sha256sum*)
         # pm ps --agents: pm's own script on the fake files, with nothing on
@@ -216,8 +232,12 @@ case ${1-} in
         fi
         files=()
         for f in "${args[@]:j+1}"; do files+=("$s/fs/$ctr$f"); done
+        track 1
+        sleep "${STUB_EXEC_DELAY:-0}"
         env -u STUB_HASH_LOG PATH="$cbin" "${STUB_SH:?}" -c "$script" sh "${files[@]}"
-        exit ;;
+        rc=$?
+        track -1
+        exit "$rc" ;;
       *' mkdir -p '*) mkdir -p -- "$s/fs/$ctr$last"; exit 0 ;;
     esac
     exit 0 ;;

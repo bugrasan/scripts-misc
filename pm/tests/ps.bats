@@ -72,6 +72,8 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
 @test "ps: HOST-HERDR is yes with pm's machine, no without, unavailable without hc" {
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
+  # the host's core runs: a process of this user in the test's pid namespace
+  fake ps "printf '%s hc serve\n' $$"
   fake_container other
   FAKE_HC_LS=$(machines "$(hc_machine pm-proj "$(pm_via pm-proj)")" "$(hc_machine other 'ssh other' false)")
   export FAKE_HC_LS
@@ -230,7 +232,49 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   expect_status 0
   [ ! -s "$HC_LOG" ] || { hc_show; fail 'hc machine ls without rows'; }
   fake_container up pm-up
+  fake ps "printf '%s hc serve\n' $$"
   FAKE_HC_LS_RC=1 FAKE_HC_LS='{"error":{"kind":"unavailable"}}' run --separate-stderr pm ps
   expect_status 0
   [ "$(ps_cell HOST-HERDR "$(ps_row up)")" = unavailable ]
+}
+
+@test "ps: without a running host core, HOST-HERDR is stopped and pm asks hc nothing" {
+  fake_container up pm-up
+  fake_container down pm-down
+  printf 'exited\n' >"$STUB_STATE/status/down"
+  # no hc serve among this user's processes; a container's core in another
+  # pid namespace (here: a process that does not exist) does not count
+  fake ps "printf '%s\n' '999999999 hc serve' '1 /usr/bin/sleep 9'"
+  run --separate-stderr pm ps -a
+  expect_status 0
+  [ "$(ps_cell HOST-HERDR "$(ps_row up)")" = stopped ]
+  [ "$(ps_cell HOST-HERDR "$(ps_row down)")" = stopped ]
+  [ ! -s "$HC_LOG" ] || { hc_show; fail 'pm ps called hc without a host core'; }
+}
+
+@test "ps: at most 5 execs run at once, and more than 5 running containers keep their rows" {
+  local i r
+  for i in 1 2 3 4 5 6 7 8; do fake_container "c$i"; done
+  : >"$STUB_STATE/cores/c2"; : >"$STUB_STATE/cores/c5"; : >"$STUB_STATE/cores/c8"
+  : >"$STUB_STATE/nohc/c3"; : >"$STUB_STATE/nohc/c7"
+  # c4 alone has the host's CLAUDE.md
+  mkdir -p "$STUB_STATE/fs/c4/home/vscode/.claude"
+  cp -- "$PM_CLAUDE_MD" "$STUB_STATE/fs/c4/home/vscode/.claude/CLAUDE.md"
+  export STUB_EXEC_DELAY=0.3
+  run --separate-stderr pm ps --agents
+  expect_status 0
+  [ "$(cat -- "$STUB_STATE/execs.max")" -le 5 ] || fail "peak: $(cat -- "$STUB_STATE/execs.max")"
+  [ "$(cat -- "$STUB_STATE/execs.max")" -ge 2 ] || fail 'the execs did not overlap'
+  # the rows in container order, each with its own results
+  [ "$(sed 1d <<<"$output" | cut -d' ' -f1 | tr '\n' ' ')" = 'c1 c2 c3 c4 c5 c6 c7 c8 ' ] || fail "rows: $output"
+  for i in 1 2 3 4 5 6 7 8; do
+    r=$(ps_row "c$i")
+    case $i in
+      2|5|8) [ "$(ps_cell CONT-HERDR "$r")" = running ] || fail "c$i: $r" ;;
+      3|7)   [ "$(ps_cell CONT-HERDR "$r")" = unavailable ] || fail "c$i: $r" ;;
+      *)     [ "$(ps_cell CONT-HERDR "$r")" = stopped ] || fail "c$i: $r" ;;
+    esac
+    if (( i == 4 )); then [ "$(ps_cell CONFIG-CC "$r")" = identical,n/a ] || fail "c4: $r"
+    else [ "$(ps_cell CONFIG-CC "$r")" = n/a,n/a ] || fail "c$i: $r"; fi
+  done
 }
