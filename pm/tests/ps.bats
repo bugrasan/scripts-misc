@@ -88,6 +88,22 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   [ "$(ps_cell HOST-HERDR "$(ps_row pm-proj)")" = unavailable ]
 }
 
+@test "M10: HOST-HERDR is yes only with podman's current path; pm's machine through another is no" {
+  fake_container pm-a pm-a
+  fake_container pm-b pm-b
+  fake ps "printf '%s hc serve\n' $$"
+  FAKE_HC_LS=$(machines "$(hc_machine pm-a "$(pm_via pm-a)")" \
+    "$(hc_machine pm-b '/usr/local/bin/podman exec -i pm-b sh -c')")
+  export FAKE_HC_LS
+  run --separate-stderr pm ps
+  expect_status 0
+  [ "$(ps_cell HOST-HERDR "$(ps_row pm-a)")" = yes ]
+  [ "$(ps_cell HOST-HERDR "$(ps_row pm-b)")" = no ]
+  [ ! -s "$HC_LOG.stdin" ] && ! hc_find machine rm || { hc_show; fail 'pm ps changed hc'; }
+  run pm ps --help
+  [[ $output == *'another podman path'*'pm hc-add'* ]] || fail "help: $output"
+}
+
 @test "ps: without -a only running containers; -a adds the others" {
   fake_container up
   fake_container down

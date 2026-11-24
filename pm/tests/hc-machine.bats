@@ -136,6 +136,66 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   hc_find -x machine add --name pm-proj --via "$(pm_via pm-proj)" || { hc_show; fail 'no hc machine add'; }
 }
 
+# ------------------------------------------------------------------ M10
+
+# stale <name> <podman path>: pm's machine for container <name> through
+# another podman path, as podman at an older place left it
+stale() { hc_machine "$1" "$2 exec -i $1 sh -c"; }
+
+@test "M10: pm's machine through another podman path is stale: pm run --hc replaces it, with a note" {
+  local old s
+  for old in /usr/local/bin/podman "'/Applications/Podman Desktop/podman'" '/opt/my tools/podman'; do
+    forget_containers
+    : >"$HC_LOG"
+    FAKE_HC_LS=$(machines "$(stale pm-proj "$old")") run --separate-stderr pm run --hc --mount "$P" "$IMG"
+    expect_status 0
+    has_line "$stderr" 'pm run: note: hc machine pm-proj connects to this container through another podman path; replacing it'
+    hc_find -x machine rm -- pm-proj || { hc_show; fail "no hc machine rm for $old"; }
+    s=$FOUND
+    hc_find -x machine add --name pm-proj --via "$(pm_via pm-proj)" || { hc_show; fail 'no hc machine add'; }
+    (( FOUND > s )) || { hc_show; fail 'hc machine add before hc machine rm'; }
+    has_line "$output" 'ok    hc machine pm-proj added'
+  done
+}
+
+@test "M10: a failing hc machine rm of a stale machine is an error with hc's output, and pm adds nothing" {
+  FAKE_HC_LS=$(machines "$(stale pm-proj /usr/local/bin/podman)")
+  export FAKE_HC_LS FAKE_HC_RM_RC=1 FAKE_HC_RM_OUT='{"error":{"kind":"unavailable"}}'
+  run --separate-stderr pm run --hc --mount "$P" "$IMG"
+  expect_status 1
+  has_line "$stderr" 'error pm-proj: hc machine rm: {"error":{"kind":"unavailable"}}'
+  has_line "$stderr" 'pm run: add it later with: pm hc-add pm-proj'
+  if hc_find machine add; then hc_show; fail 'pm added the machine'; fi
+  [[ -e $STUB_STATE/containers/pm-proj ]]
+}
+
+@test "M10: look-alikes of pm's connection stay another connection" {
+  local t
+  # no via, more after sh -c, nothing before exec, another container
+  for t in '/usr/local/bin/podman exec -i pm-proj sh -c|false' \
+    '/usr/local/bin/podman exec -i pm-proj sh -c -x|true' \
+    ' exec -i pm-proj sh -c|true' \
+    '/usr/local/bin/podman exec -i xpm-proj sh -c|true'; do
+    forget_containers
+    : >"$HC_LOG"
+    FAKE_HC_LS=$(machines "$(hc_machine pm-proj "${t%|*}" "${t##*|}")") \
+      run --separate-stderr pm run --hc --mount "$P" "$IMG"
+    expect_status 1
+    has_line "$stderr" 'error pm-proj: hc already has a machine pm-proj with another connection; see hc machine ls'
+    if hc_find machine rm || hc_find machine add; then hc_show; fail "pm changed hc for: $t"; fi
+  done
+}
+
+@test "M10: pm rm removes pm's machine through another podman path" {
+  fake_container pm-x pm-x
+  FAKE_HC_LS=$(machines "$(stale pm-x "'/old place/podman'")")
+  export FAKE_HC_LS
+  run --separate-stderr pm rm --force pm-x
+  expect_status 0
+  hc_find -x machine rm -- pm-x || { hc_show; fail 'no hc machine rm'; }
+  has_line "$output" 'ok    hc machine pm-x removed'
+}
+
 # ------------------------------------------------------------------ D19, D20
 
 @test "D19: without hc on PATH, pm notes it and adds no machine; container and core stay" {

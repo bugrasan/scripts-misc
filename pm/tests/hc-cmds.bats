@@ -128,6 +128,32 @@ ok    hc machine pm-x added' ] || fail "output: $output"
   has_line "$stderr" 'error no hc on PATH; install it on this host to remove the hc machine pm-x'
 }
 
+@test "M10: hc-add repairs pm's machine through another podman path; hc-rm removes such a machine" {
+  local s
+  fake_container pm-x pm-x
+  FAKE_HC_LS=$(machines "$(hc_machine pm-x '/usr/local/bin/podman exec -i pm-x sh -c')")
+  export FAKE_HC_LS
+  run --separate-stderr pm hc-add pm-x
+  expect_status 0
+  has_line "$stderr" 'pm hc-add: note: hc machine pm-x connects to this container through another podman path; replacing it'
+  hc_find -x machine rm -- pm-x || { hc_show; fail 'no hc machine rm'; }
+  s=$FOUND
+  hc_find -x machine add --name pm-x --via "$(pm_via pm-x)" || { hc_show; fail 'no hc machine add'; }
+  (( FOUND > s )) || { hc_show; fail 'hc machine add before hc machine rm'; }
+  [ "$output" = $'ok    hc serve started in pm-x\nok    hc machine pm-x added' ] || fail "output: $output"
+  : >"$HC_LOG"
+  run --separate-stderr pm hc-rm pm-x
+  expect_status 0
+  hc_find -x machine rm -- pm-x || { hc_show; fail 'no hc machine rm'; }
+  [ "$output" = 'ok    hc machine pm-x removed' ] || fail "output: $output"
+}
+
+@test "M10: the help of hc-add says that it repairs a machine with another podman path" {
+  run pm hc-add --help
+  expect_status 0
+  [[ $output == *'another podman path'* && $output == *repair* ]] || fail "help: $output"
+}
+
 # ------------------------------------------------------------------ pm run hints
 
 @test "pm run: without hc, the note points to pm hc-add" {
