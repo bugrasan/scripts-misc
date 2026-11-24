@@ -107,6 +107,17 @@ EOF
   [ "$output" = "failed uuid source: neither uuidgen nor $T/no-such-file" ]
 }
 
+@test "doctor: on macOS, the core that launchd starts (--hc-launchd) counts as running" {
+  fake ps "printf '%s %s\n' $$ '/Applications/Herdr.app/Contents/MacOS/hc --hc-launchd /tmp/hc.sock'"
+  run --separate-stderr pm doctor
+  expect_status 0
+  has_line "$output" 'ok     hc core running'
+  # other hc processes are no core
+  fake ps "printf '%s %s\n' $$ 'hc attach t3' $$ 'hc --hc-launchdx'"
+  run --separate-stderr pm doctor
+  has_line "$output" 'failed hc core not running (starts on first hc use)'
+}
+
 @test "doctor: the core check reads processes and never asks hc" {
   run --separate-stderr pm doctor
   expect_status 0

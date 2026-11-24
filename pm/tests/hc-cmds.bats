@@ -89,7 +89,7 @@ ok    hc machine pm-x added' ] || fail "output: $output"
   export FAKE_HC_LS
   run --separate-stderr pm hc-rm pm-x
   expect_status 0
-  hc_find -x machine rm pm-x || { hc_show; fail 'no hc machine rm'; }
+  hc_find -x machine rm -- pm-x || { hc_show; fail 'no hc machine rm'; }
   [ "$output" = 'ok    hc machine pm-x removed' ] || fail "output: $output"
   if podman_find rm; then podman_show; fail 'pm removed the container'; fi
   [[ -e $STUB_STATE/containers/pm-x ]]
@@ -114,7 +114,7 @@ ok    hc machine pm-x added' ] || fail "output: $output"
   FAKE_HC_LS=$FAKE_HC_LS FAKE_HC_RM_RC=4 FAKE_HC_RM_OUT='{"error":{"kind":"machine_unknown"}}' \
     run --separate-stderr pm hc-rm pm-x
   expect_status 1
-  has_line "$stderr" 'error hc machine pm-x: {"error":{"kind":"machine_unknown"}}'
+  has_line "$stderr" 'error hc machine pm-x: {"error":{"kind":"machine_unknown"}}; remove it by hand with: hc machine rm pm-x'
 
   fake_container pm-y
   run --separate-stderr pm hc-rm pm-y

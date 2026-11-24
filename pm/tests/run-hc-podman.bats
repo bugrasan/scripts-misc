@@ -376,6 +376,15 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   [ "$(ps_cell CONFIG-CC "$r")" = differ,identical ]
   [ "$(ps_cell CONFIG-CP "$r")" = differ,n/a ]
 
+  # a file the container user cannot read is n/a and shifts no other state
+  printf 'rules\n' >"$PM_CLAUDE_MD"
+  podman exec --user root -- "$CTR" chmod 000 /home/vscode/.claude/CLAUDE.md
+  run --separate-stderr pm ps --agents
+  expect_status 0
+  r=$(real_row "$CTR")
+  [ "$(ps_cell CONFIG-CC "$r")" = n/a,identical ] || fail "row: $r"
+  [ "$(ps_cell CONFIG-CP "$r")" = identical,n/a ] || fail "row: $r"
+
   run --separate-stderr pm stop "$CTR"
   expect_status 0
   run --separate-stderr pm ps --agents -a
@@ -408,4 +417,35 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   if [[ $(podman --version) == 'podman version 6.2.'* ]]; then
     grep -qE '^ok     podman 6\.2\.[0-9]+ \(needs 6\.2 or later\)$' <<<"$output" || fail "podman line: $output"
   fi
+}
+
+@test "pm doctor does not count the core of a keep-id container as the host's" {
+  run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
+  expect_status 0
+  hc_serve_running "$CTR"
+  # the container's hc serve runs as this user, in another pid namespace
+  run --separate-stderr pm doctor
+  has_line "$output" 'failed hc core not running (starts on first hc use)'
+}
+
+@test "pm ps --agents: a newline in a real create command, and a mount secret" {
+  local cc=pmt-cc-$$-$RANDOM cp=pmt-cp-$$-$RANDOM r
+  printf 'token' | podman secret create -- "$cc" - >/dev/null
+  SECRETS+=("$cc")
+  printf 'token' | podman secret create -- "$cp" - >/dev/null
+  SECRETS+=("$cp")
+  export PM_CC_SECRET=$cc PM_CP_SECRET=$cp
+  podman run -d --init --userns=keep-id -e $'NOTE=a\nb' --secret "$cc,type=env,target=X_TOKEN" \
+    --name "$CTR" "$IMG" sleep infinity >/dev/null
+  podman run -d --init --userns=keep-id --secret "$cp" --name "$CTR2" "$IMG" sleep infinity >/dev/null
+  run --separate-stderr pm ps --agents
+  expect_status 0
+  # one row each, however the create command spells its arguments
+  [ "$(grep -c -E " $CTR " <<<"$output")" -eq 1 ] || fail "rows: $output"
+  r=$(real_row "$CTR") || fail "no row for $CTR in: $output"
+  [ "$(ps_cell SECRET-CC "$r")" = yes ]
+  [ "$(ps_cell SECRET-CP "$r")" = no ]
+  r=$(real_row "$CTR2") || fail "no row for $CTR2 in: $output"
+  [ "$(ps_cell SECRET-CC "$r")" = no ]
+  [ "$(ps_cell SECRET-CP "$r")" = yes ]
 }

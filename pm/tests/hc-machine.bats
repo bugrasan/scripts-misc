@@ -175,7 +175,7 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   export FAKE_HC_LS
   run --separate-stderr pm rm --force pm-x
   expect_status 0
-  hc_find -x machine rm pm-x || { hc_show; fail 'no hc machine rm'; }
+  hc_find -x machine rm -- pm-x || { hc_show; fail 'no hc machine rm'; }
   [ "$(grep -n -e 'container pm-x removed' -e 'hc machine pm-x removed' <<<"$output" | cut -d: -f1 | tr '\n' ' ')" = '1 2 ' ] \
     || fail "order: $output"
 }
@@ -207,7 +207,7 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   run --separate-stderr pm rm --force pm-x
   expect_status 1
   has_line "$output" 'ok    container pm-x removed'
-  has_line "$stderr" "error hc machine pm-x: $FAKE_HC_RM_OUT"
+  has_line "$stderr" "error hc machine pm-x: $FAKE_HC_RM_OUT; remove it by hand with: hc machine rm pm-x"
   [[ ! -e $STUB_STATE/containers/pm-x ]]
 }
 

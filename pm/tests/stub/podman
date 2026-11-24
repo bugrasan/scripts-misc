@@ -9,11 +9,13 @@
 #   mounts/<name>      one bind mount per line, as <source>:<target>
 #   labels/<name>      the value of its pm-hc label
 #   pmscript/<name>    the value of its pm-script label
-#   create/<name>      its podman run arguments, one per line
+#   create/<name>      its podman run arguments, each ended by a NUL
+#   secrets/<name>     its mount secrets, one name per line
 #   cores/<name>       present while hc serve runs in it
 #   nohc/<name>        present when it has no hc
 #   nosha/<name>       present when it has no sha256sum
 #   fs/<name>/...      its files, from podman cp
+#   cbin/<name>        the PATH of its sha256 script
 # and networks/<name> per fake network
 # settings, all optional:
 #   STUB_PODMAN_VERSION version that --version reports (default 6.2.0)
@@ -30,8 +32,9 @@
 #                       lines `image list`, `network ls`, and `ps` (without
 #                       -q or a pm-hc label filter) print
 
-printf '%q ' "$@" >>"${PODMAN_LOG:?}"
-printf '\n' >>"$PODMAN_LOG"
+# one write per call, as pm runs some podman calls at the same time
+line=$(printf '%q ' "$@")
+printf '%s\n' "$line" >>"${PODMAN_LOG:?}"
 
 s=${STUB_STATE:?}
 c=$s/containers n=$s/networks
@@ -42,6 +45,16 @@ us=$'\x1f' rs=$'\x1e'
 status() { if [[ -e $s/status/$1 ]]; then cat -- "$s/status/$1"; else printf '%s\n' "${STUB_STATUS:-running}"; fi; }
 # val <dir> <name>: the content of a state file, or nothing
 val() { [[ ! -e $s/$1/$2 ]] || cat -- "$s/$1/$2"; }
+# jlabel <name>: its pm-hc label as podman's json prints it
+jlabel() { printf '"%s"' "$(val labels "$1")"; }
+# jcreate <name>: its create command as podman's json prints it
+jcreate() {
+  local -a a=()
+  [[ ! -e $s/create/$1 ]] || mapfile -t -d '' a <"$s/create/$1"
+  if (( ${#a[@]} == 0 )); then echo null; return; fi
+  "${STUB_PYTHON:?}" -I -c 'import json, sys
+print(json.dumps(sys.argv[1:], separators=(",", ":"), ensure_ascii=False))' "${a[@]}"
+}
 
 case ${1-} in
   --version) printf 'podman version %s\n' "${STUB_PODMAN_VERSION:-6.2.0}"; exit 0 ;;
@@ -55,26 +68,23 @@ case ${1-} in
       exists) [[ -e $c/$last ]]; exit ;;
       inspect)
         fmt=$4
-        # the formats of pm ps, pm ps --agents, and the mount scan of pm
-        # run inspect all given containers at once; fields as pm asks
-        if [[ $fmt == *NetworkMode* || $fmt == *CreateCommand* || $fmt == *.Mounts* ]]; then
+        # the formats of pm ps and the mount scan of pm run inspect all
+        # given containers at once; fields as pm asks
+        if [[ $fmt == *NetworkMode* || $fmt == *.Mounts* ]]; then
           for id in "${@:5}"; do
             [[ -e $c/$id ]] || continue
-            net=$(val containers "$id") ms=''
+            net=$(val containers "$id") ms='' secs=''
             if [[ $fmt == *NetworkMode* ]]; then
               # pm ps: id, name, status, pm-script, devcontainer folder,
-              # target=source mounts, networks, network mode, pm-hc
+              # target=source mounts, networks, network mode, pm-hc and
+              # create command as json, mount secrets
               if [[ -e $s/mounts/$id ]]; then
                 while IFS= read -r m; do ms+="${m#*:}=${m%%:*};"; done <"$s/mounts/$id"
               fi
-              printf '%s\n' "$id$us$id$us$(status "$id")$us$(val pmscript "$id")$us$us$ms$us${net:+$net,}$us${net:+bridge}${net:-pasta}$us$(val labels "$id")"
-            elif [[ $fmt == *CreateCommand* ]]; then
-              # pm ps --agents: id, name, status, create command, secrets
-              cmd=''
-              if [[ -e $s/create/$id ]]; then
-                while IFS= read -r a; do cmd+=$a$rs; done <"$s/create/$id"
+              if [[ -e $s/secrets/$id ]]; then
+                while IFS= read -r m; do secs+=$m$rs; done <"$s/secrets/$id"
               fi
-              printf '%s\n' "$id$us$id$us$(status "$id")$us$cmd$us"
+              printf '%s\n' "$id$us$id$us$(status "$id")$us$(val pmscript "$id")$us$us$ms$us${net:+$net,}$us${net:+bridge}${net:-pasta}$us$(jlabel "$id")$us$(jcreate "$id")$us$secs"
             else
               # pm run: names and bind-mount sources
               if [[ -e $s/mounts/$id ]]; then
@@ -90,15 +100,16 @@ case ${1-} in
           exit 125
         fi
         case $fmt in
-          # pm rm: the state, the pm-hc label, then one network per line
+          # pm rm: the state, the pm-hc label as json, then one network per
+          # line
           *NetworkSettings*)
             status "$last"
-            [[ $fmt != *pm-hc* ]] || printf '%s\n' "$(val labels "$last")"
+            [[ $fmt != *pm-hc* ]] || printf '%s\n' "$(jlabel "$last")"
             printf '%s\n' "$(val containers "$last")" ;;
-          # pm hc-add: the pm-hc label and the state
-          *pm-hc*State.Status*) printf '%s\n' "$(val labels "$last")$us$(status "$last")" ;;
-          # pm start, pm hc-rm: the pm-hc label alone
-          *pm-hc*) printf '%s\n' "$(val labels "$last")" ;;
+          # pm hc-add: the pm-hc label as json and the state
+          *pm-hc*State.Status*) printf '%s\n' "$(jlabel "$last")$us$(status "$last")" ;;
+          # pm start, pm hc-rm: the pm-hc label as json
+          *pm-hc*) printf '%s\n' "$(jlabel "$last")" ;;
           *State.Running*)
             if [[ $(status "$last") == running ]]; then echo true; else echo false; fi ;;
           *) printf '[{"Name":"%s"}]\n' "$last" ;;
@@ -143,7 +154,7 @@ case ${1-} in
     done
     if [[ -n $name ]]; then
       printf '%s\n' "$net" >"$c/$name"
-      printf '%s\n' "${args[@]}" >"$s/create/$name"
+      printf '%s\0' podman "${args[@]}" >"$s/create/$name"
       (( ${#vols[@]} == 0 )) || printf '%s\n' "${vols[@]}" >"$s/mounts/$name"
       [[ -z $label ]] || printf '%s\n' "$label" >"$s/labels/$name"
       [[ -z $script ]] || printf '%s\n' "$script" >"$s/pmscript/$name"
@@ -170,28 +181,44 @@ case ${1-} in
     [[ ! -e $s/cores/$2 ]] || printf 'hc serve \n'
     exit 0 ;;
   exec)
-    args=("$@")
+    args=("$@") ctr=$2 script='' j=0
+    # the container: the word after --, else the one after exec
+    for (( i = 1; i < ${#args[@]}; i++ )); do
+      if [[ ${args[i]} == -- ]]; then ctr=${args[i+1]}; break; fi
+    done
     case $* in
       *' hc serve')
-        # the container is the word before hc serve
-        ctr=${args[${#args[@]}-3]}
         [[ -z ${STUB_EXEC_ERR-} ]] || printf '%s\n' "$STUB_EXEC_ERR" >&2
         [[ ${STUB_EXEC_RC:-0} == 0 ]] || exit "$STUB_EXEC_RC"
         : >"$s/cores/$ctr"
         echo fedcba9876543210fedcba9876543210
         exit 0 ;;
-      *'command -v hc'*)
-        [[ ! -e $s/nohc/$2 ]]
-        exit ;;
-      *sha256sum*)
-        # pm ps --agents: one line per file after `sh`: its hash, or -
-        [[ ! -e $s/nosha/$2 ]] || exit 3
-        for (( i = 0; i < ${#args[@]}; i++ )); do [[ ${args[i]} != sh ]] || j=$i; done
-        for f in "${args[@]:j+1}"; do
-          if [[ -f $s/fs/$2$f ]]; then sha256sum <"$s/fs/$2$f"; else echo -; fi
-        done
+      *'/proc/[0-9]*'*)
+        # pm ps: the herdr state in the container
+        if [[ -e $s/cores/$ctr ]]; then echo running
+        elif [[ -e $s/nohc/$ctr ]]; then echo unavailable
+        else echo stopped; fi
         exit 0 ;;
-      *' mkdir -p '*) mkdir -p -- "$s/fs/$2$last"; exit 0 ;;
+      *sha256sum*)
+        # pm ps --agents: pm's own script on the fake files, with nothing on
+        # PATH but a sha256sum from stub/hash-tool, unless the container has
+        # none; portable where the host lacks sha256sum
+        for (( i = 0; i < ${#args[@]}; i++ )); do
+          [[ ${args[i]} != -c ]] || script=${args[i+1]}
+          [[ ${args[i]} != sh ]] || j=$i
+        done
+        cbin=$s/cbin/$ctr
+        mkdir -p -- "$cbin"
+        rm -f -- "$cbin/sha256sum"
+        if [[ ! -e $s/nosha/$ctr ]]; then
+          printf '#!%s\nexec %q %q "$@"\n' "${STUB_BASH:?}" "$STUB_BASH" "${STUB_HASH_TOOL:?}" >"$cbin/sha256sum"
+          chmod 755 "$cbin/sha256sum"
+        fi
+        files=()
+        for f in "${args[@]:j+1}"; do files+=("$s/fs/$ctr$f"); done
+        env -u STUB_HASH_LOG PATH="$cbin" "${STUB_SH:?}" -c "$script" sh "${files[@]}"
+        exit ;;
+      *' mkdir -p '*) mkdir -p -- "$s/fs/$ctr$last"; exit 0 ;;
     esac
     exit 0 ;;
   cp)

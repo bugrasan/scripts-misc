@@ -28,7 +28,10 @@ stub_setup() {
   HC=$HOME/.config/herdr-core/container
   P=$T/proj
   mkdir -p "$HOME" "$STUB_BIN" "$FAKE_BIN" "$P"
-  mkdir -p "$STUB_STATE"/{containers,networks,status,mounts,labels,pmscript,create,cores,nohc,nosha,fs}
+  mkdir -p "$STUB_STATE"/{containers,networks,status,mounts,labels,pmscript,create,secrets,cores,nohc,nosha,fs,cbin}
+  # what the fake podman needs to run pm's in-container scripts
+  STUB_SH=$(command -v sh) STUB_BASH=$BASH STUB_HASH_TOOL=$PM_TESTS_DIR/stub/hash-tool
+  export STUB_SH STUB_BASH STUB_HASH_TOOL
   : >"$PODMAN_LOG"
   : >"$HC_LOG"
   # the fake podman, and a fake host hc so that no real one is ever reached
@@ -182,7 +185,7 @@ fake_container() {
 # the same folder is no second container
 forget_containers() {
   local d
-  for d in containers status mounts labels pmscript create cores nohc nosha; do
+  for d in containers status mounts labels pmscript create secrets cores nohc nosha; do
     rm -f -- "$STUB_STATE/$d"/*
   done
 }
@@ -211,24 +214,20 @@ ps_row() { grep -m1 -E "^$1 " <<<"$output"; }
 
 # ps_cell <column> <row>: the cell of <row> below <column> of the header
 # (the first line of $output), trailing blanks removed; the cells line up
-# with the header words
+# with the header words, and the next column starts the next cell
 ps_cell() {
-  local head=${output%%$'\n'*} c pos i v
-  local -a names=() starts=()
-  for c in 'CONTAINER ID' NAME STATUS PM NETWORK CONT-HERDR HOST-HERDR PROJECT \
-    SECRET-CC CONFIG-CC SECRET-CP CONFIG-CP; do
+  local head=${output%%$'\n'*} c pos start=-1 next=-1
+  [[ $head == *"$1"* ]] || return 1
+  pos=${head%%"$1"*}
+  start=${#pos}
+  for c in 'CONTAINER ID' NAME STATUS PM NETWORK CONT-HERDR HOST-HERDR SECRET-CC \
+    CONFIG-CC SECRET-CP CONFIG-CP PROJECT; do
     [[ $head == *"$c"* ]] || continue
     pos=${head%%"$c"*}
-    names+=("$c") starts+=("${#pos}")
+    if (( ${#pos} > start && ( next < 0 || ${#pos} < next ) )); then next=${#pos}; fi
   done
-  for (( i = 0; i < ${#names[@]}; i++ )); do
-    [[ ${names[i]} == "$1" ]] || continue
-    if (( i + 1 < ${#names[@]} )); then v=${2:starts[i]:starts[i+1]-starts[i]}
-    else v=${2:starts[i]}; fi
-    printf '%s\n' "${v%"${v##*[![:space:]]}"}"
-    return 0
-  done
-  return 1
+  if (( next < 0 )); then c=${2:start}; else c=${2:start:next-start}; fi
+  printf '%s\n' "${c%"${c##*[![:space:]]}"}"
 }
 
 # no_create: pm created no network and no container

@@ -113,8 +113,10 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   expect_status 0
   run --separate-stderr pm ps --agents
   expect_status 0
-  [[ ${lines[0]} =~ ^CONTAINER\ ID\ +NAME\ +STATUS\ +SECRET-CC\ +CONFIG-CC\ +SECRET-CP\ +CONFIG-CP$ ]] \
+  # P7: the default table with the agent columns before PROJECT
+  [[ ${lines[0]} =~ ^CONTAINER\ ID\ +NAME\ +STATUS\ +PM\ +NETWORK\ +CONT-HERDR\ +HOST-HERDR\ +SECRET-CC\ +CONFIG-CC\ +SECRET-CP\ +CONFIG-CP\ +PROJECT$ ]] \
     || fail "header: ${lines[0]}"
+  [ "$(ps_cell PROJECT "$(ps_row pm-proj)")" = "$P" ]
   local r
   r=$(ps_row pm-proj)
   [ "$(ps_cell SECRET-CC "$r")" = yes ]
@@ -132,7 +134,7 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   [ "$(ps_cell CONFIG-CP "$r")" = differ,n/a ]
 }
 
-@test "ps --agents: no secrets and no files give no and n/a; one exec per running container" {
+@test "ps --agents: no secrets and no files give no and n/a; one exec per running container for each part" {
   run --separate-stderr pm run --mount "$P" "$IMG"
   expect_status 0
   fake_container nosum
@@ -147,11 +149,19 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   [ "$(ps_cell CONFIG-CC "$r")" = n/a,n/a ]
   [ "$(ps_cell CONFIG-CP "$r")" = n/a,n/a ]
   [ "$(ps_cell CONFIG-CC "$(ps_row nosum)")" = n/a,n/a ]
+  # the agent files: one exec per running container; the herdr columns
+  # their own one, and no podman top
   podman_load
   for (( i = 0; i < ${#CALLS[@]}; i++ )); do
-    [[ ${CALLS[i]} != exec* ]] || n=$((n + 1))
+    [[ ${CALLS[i]} != exec*sha256sum* ]] || n=$((n + 1))
   done
-  [ "$n" -eq 2 ] || { podman_show; fail "$n execs for 2 running containers"; }
+  [ "$n" -eq 2 ] || { podman_show; fail "$n hash execs for 2 running containers"; }
+  n=0
+  for (( i = 0; i < ${#CALLS[@]}; i++ )); do
+    [[ ${CALLS[i]} != exec*/proc* ]] || n=$((n + 1))
+  done
+  [ "$n" -eq 2 ] || { podman_show; fail "$n herdr execs for 2 running containers"; }
+  if podman_find top; then podman_show; fail 'pm ps called podman top'; fi
 }
 
 @test "ps --agents: a stopped container shows stopped in the CONFIG columns; -a combines" {
@@ -174,4 +184,53 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   done
   run --separate-stderr pm ps --agents x
   expect_status 2
+}
+
+# ------------------------------------------------------------------ review round 1
+
+@test "ps --agents: a newline in the create command splits no row and hides no --secret" {
+  fake_container odd
+  printf '%s\0' podman run -d -e $'NOTE=a\nb' --secret cc_token,type=env,target=X \
+    --name odd example.org/img:1 sleep infinity >"$STUB_STATE/create/odd"
+  run --separate-stderr pm ps --agents
+  expect_status 0
+  [ "${#lines[@]}" -eq 2 ] || fail "rows: $output"
+  [ "$(ps_cell SECRET-CC "$(ps_row odd)")" = yes ]
+  [ "$(ps_cell SECRET-CP "$(ps_row odd)")" = no ]
+}
+
+@test "ps --agents: a mount secret counts, and a name that only starts alike does not" {
+  fake_container ms
+  printf 'cp_token\n' >"$STUB_STATE/secrets/ms"
+  fake_container alike
+  printf '%s\0' podman run --secret cc_token2,type=env,target=X --secret=cp_token_old \
+    --name alike example.org/img:1 >"$STUB_STATE/create/alike"
+  run --separate-stderr pm ps --agents
+  expect_status 0
+  [ "$(ps_cell SECRET-CP "$(ps_row ms)")" = yes ]
+  [ "$(ps_cell SECRET-CC "$(ps_row ms)")" = no ]
+  [ "$(ps_cell SECRET-CC "$(ps_row alike)")" = no ]
+  [ "$(ps_cell SECRET-CP "$(ps_row alike)")" = no ]
+}
+
+@test "ps --agents: an unreadable file in the container is n/a and shifts no other state" {
+  (( EUID != 0 )) || skip 'root can read any file'
+  run --separate-stderr pm run --cc --cp --mount "$P" "$IMG"
+  expect_status 0
+  chmod 000 "$STUB_STATE/fs/pm-proj/home/vscode/.claude/CLAUDE.md"
+  run --separate-stderr pm ps --agents
+  chmod 600 "$STUB_STATE/fs/pm-proj/home/vscode/.claude/CLAUDE.md"
+  expect_status 0
+  [ "$(ps_cell CONFIG-CC "$(ps_row pm-proj)")" = n/a,identical ]
+  [ "$(ps_cell CONFIG-CP "$(ps_row pm-proj)")" = identical,identical ]
+}
+
+@test "ps: no rows, no hc machine ls; a failing one makes HOST-HERDR unavailable" {
+  run --separate-stderr pm ps
+  expect_status 0
+  [ ! -s "$HC_LOG" ] || { hc_show; fail 'hc machine ls without rows'; }
+  fake_container up pm-up
+  FAKE_HC_LS_RC=1 FAKE_HC_LS='{"error":{"kind":"unavailable"}}' run --separate-stderr pm ps
+  expect_status 0
+  [ "$(ps_cell HOST-HERDR "$(ps_row up)")" = unavailable ]
 }
