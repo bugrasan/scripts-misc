@@ -206,6 +206,23 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
 
 # ------------------------------------------------------------------ review round 1
 
+@test "C3: pm ps --agents leaves config.json alone, as the Copilot CLI rewrites it" {
+  local f
+  export PM_COPILOT_CONFIG=$T/copilot-config.json
+  printf '{"c":3}\n' >"$PM_COPILOT_CONFIG"
+  run --separate-stderr pm run --cp --mount "$P" "$IMG"
+  expect_status 0
+  printf 'rewritten\n' >"$STUB_STATE/fs/pm-proj/home/vscode/.copilot/config.json"
+  : >"$PODMAN_LOG"
+  run --separate-stderr pm ps --agents
+  expect_status 0
+  [ "$(ps_cell CONFIG-CP "$(ps_row pm-proj)")" = identical,identical ]
+  podman_find exec -- pm-proj sh -c || { podman_show; fail 'no exec'; }
+  for f in "${CALL[@]}"; do [[ $f != *config.json* ]] || fail "pm ps --agents reads $f"; done
+  run pm ps --help
+  [[ $output == *'config.json'* ]] || fail "help: $output"
+}
+
 @test "ps --agents: a newline in the create command splits no row and hides no --secret" {
   fake_container odd
   printf '%s\0' podman run -d -e $'NOTE=a\nb' --secret cc_token,type=env,target=X \

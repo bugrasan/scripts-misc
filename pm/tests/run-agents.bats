@@ -107,3 +107,56 @@ fs() { printf '%s\n' "$STUB_STATE/fs/pm-proj$1"; }
   [[ $output == *'uid=1000(vscode)'* && $output == *'--userns=keep-id:uid=1000,gid=1000'* ]] \
     || fail "readme: $output"
 }
+
+@test "C3: pm run --cp copies the config template to ~/.copilot/config.json" {
+  export PM_COPILOT_CONFIG=$T/copilot-config.json
+  printf '{"trusted_folders":["/workspaces"]}\n' >"$PM_COPILOT_CONFIG"
+  run --separate-stderr pm run --cp --mount "$P" "$IMG"
+  expect_status 0
+  cmp -- "$PM_COPILOT_CONFIG" "$(fs /home/vscode/.copilot/config.json)"
+  has_line "$output" "ok    $PM_COPILOT_CONFIG -> pm-proj:/home/vscode/.copilot/config.json"
+}
+
+@test "C3: without PM_COPILOT_CONFIG, ~/.copilot/config.json.template is the source; missing, a skip line" {
+  mkdir -p "$HOME/.copilot"
+  printf '{"a":"b"}\n' >"$HOME/.copilot/config.json.template"
+  run --separate-stderr pm run --cp --mount "$P" "$IMG"
+  expect_status 0
+  cmp -- "$HOME/.copilot/config.json.template" "$(fs /home/vscode/.copilot/config.json)"
+  forget_containers
+  rm -rf -- "$STUB_STATE/fs/pm-proj" "$HOME/.copilot"
+  run --separate-stderr pm run --cp --mount "$P" "$IMG"
+  expect_status 0
+  has_line "$output" "skip  $HOME/.copilot/config.json.template: not found"
+  [[ ! -e $(fs /home/vscode/.copilot/config.json) ]]
+  cmp -- "$PM_COPILOT_SETTINGS" "$(fs /home/vscode/.copilot/settings.json)"
+}
+
+@test "C3: pm cp-copilot copies config.json as well, and its help names the source" {
+  export PM_COPILOT_CONFIG=$T/copilot-config.json
+  printf '{"c":3}\n' >"$PM_COPILOT_CONFIG"
+  fake_container pm-x
+  run --separate-stderr pm cp-cp pm-x
+  expect_status 0
+  cmp -- "$PM_COPILOT_CONFIG" "$STUB_STATE/fs/pm-x/home/vscode/.copilot/config.json"
+  has_line "$output" "ok    $PM_COPILOT_CONFIG -> pm-x:/home/vscode/.copilot/config.json"
+  run pm cp-copilot --help
+  expect_status 0
+  has_line "$output" "  $PM_COPILOT_CONFIG"
+  has_line "$output" '    -> /home/vscode/.copilot/config.json  (skipped when missing)'
+  [[ $output == *PM_COPILOT_CONFIG* ]] || fail "help: $output"
+}
+
+@test "C3: PM_COPILOT_CONFIG is listed with the other PM_* variables" {
+  export PM_COPILOT_CONFIG=$T/copilot-config.json
+  run pm help
+  expect_status 0
+  [[ $output == *'environment: '*PM_COPILOT_SETTINGS*PM_COPILOT_CONFIG* ]] || fail "pm help: $output"
+  run pm readme
+  expect_status 0
+  has_line "$output" "  PM_COPILOT_CONFIG    $PM_COPILOT_CONFIG"
+  run pm run --help
+  expect_status 0
+  [[ $output == *'with --cp: as pm cp-copilot, instructions, settings, and config.json into ~/.copilot'* ]] \
+    || fail "help: $output"
+}

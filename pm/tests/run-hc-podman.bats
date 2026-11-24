@@ -341,6 +341,22 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   [ "$(ps_cell HOST-HERDR "$r")" = yes ]
   [ "$(ps_cell PROJECT "$r")" = "$DIR" ]
 
+  # a machine through another podman path, as after podman moved, is
+  # stale: pm ps shows no, and pm hc-add replaces it
+  mkdir -p -- "$BATS_TEST_TMPDIR/oldbin"
+  ln -s -- "$(command -v podman)" "$BATS_TEST_TMPDIR/oldbin/podman"
+  hc machine rm -- "$CTR" >/dev/null
+  hc machine add --name "$CTR" --via "$BATS_TEST_TMPDIR/oldbin/podman exec -i $CTR sh -c" \
+    </dev/null >/dev/null
+  run --separate-stderr pm ps
+  expect_status 0
+  [ "$(ps_cell HOST-HERDR "$(real_row "$CTR")")" = no ] || fail "output: $output"
+  run --separate-stderr pm hc-add "$CTR"
+  expect_status 0
+  has_line "$stderr" "pm hc-add: note: hc machine $CTR connects to this container through another podman path; replacing it"
+  [ "$(host_machine "$CTR")" = "$(command -v podman) exec -i $CTR sh -c True" ] \
+    || fail "machine: $(hc machine ls --json)"
+
   # hc-rm drops the machine and keeps the container; a second hc-rm skips
   run --separate-stderr pm hc-rm "$CTR"
   expect_status 0
