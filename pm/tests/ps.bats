@@ -54,6 +54,12 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
 @test "ps: CONT-HERDR is running, stopped, or unavailable" {
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
+  # pm starts no core: stopped until the machine's connection or an hc
+  # command starts one
+  run --separate-stderr pm ps
+  expect_status 0
+  [ "$(ps_cell CONT-HERDR "$(ps_row pm-proj)")" = stopped ]
+  : >"$STUB_STATE/cores/pm-proj"
   fake_container idle
   fake_container nohcc
   : >"$STUB_STATE/nohc/nohcc"

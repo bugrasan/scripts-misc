@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # stub tests for the hc machine of a pm run --hc container (pm v9, owner
-# decisions D15 to D22): a fake podman and a fake host hc (stub/hc) log
+# decisions D15 to D21, M10, Q24): a fake podman and a fake hc (stub/hc) log
 # every call, and HOME is a per-test folder; no real podman or hc runs
 # run: bats pm/tests/hc-machine.bats
 # shellcheck disable=SC2016,SC2030,SC2031
@@ -18,10 +18,10 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
 
 # ------------------------------------------------------------------ D15
 
-@test "D15: after hc serve, pm adds the container as an hc machine, without stdin and --install" {
+@test "D15: pm adds the container as an hc machine, without stdin and --install, and starts no hc serve" {
   run --separate-stderr pm run --hc --mount "$P" "$IMG" <<<'y'
   expect_status 0
-  hc_serve_call pm-proj
+  no_hc_serve
   hc_find -x machine ls --json || { hc_show; fail 'no hc machine ls --json'; }
   hc_find -x machine add --name pm-proj --via "$(pm_via pm-proj)" || { hc_show; fail 'no hc machine add'; }
   [ "$(<"$HC_LOG.stdin")" = devnull ]
@@ -40,13 +40,6 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   [[ $via == *' exec -i pm-proj sh -c' ]] || fail "via: $via"
   # sh must read the path back as one word
   [ "$(sh -c "set -- ${via% exec -i pm-proj sh -c}; printf '%s' \"\$1\"")" = "$odd/podman" ]
-}
-
-@test "D15: no hc machine calls when hc serve fails" {
-  export STUB_EXEC_RC=127 STUB_EXEC_ERR='Error: crun: executable file `hc` not found'
-  run --separate-stderr pm run --hc --mount "$P" "$IMG"
-  expect_status 1
-  [ ! -s "$HC_LOG" ] || { hc_show; fail 'hc was called'; }
 }
 
 # ------------------------------------------------------------------ D16
@@ -198,14 +191,14 @@ stale() { hc_machine "$1" "$2 exec -i $1 sh -c"; }
 
 # ------------------------------------------------------------------ D19, D20
 
-@test "D19: without hc on PATH, pm notes it and adds no machine; container and core stay" {
+@test "D19: without hc on PATH, pm notes it and adds no machine; the container stays" {
   rm -- "$STUB_BIN/hc"
   use_min_path
   fake_hash sha256sum
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
   has_line "$stderr" 'pm run: note: no hc on PATH, so pm-proj is not added as an hc machine; add it later with: pm hc-add pm-proj'
-  hc_serve_call pm-proj
+  no_hc_serve
   if podman_find rm; then podman_show; fail 'pm removed the container'; fi
 }
 
@@ -278,49 +271,31 @@ stale() { hc_machine "$1" "$2 exec -i $1 sh -c"; }
   [ ! -s "$HC_LOG" ] || { hc_show; fail 'hc was called'; }
 }
 
-# ------------------------------------------------------------------ D22
+# ------------------------------------------------------------------ Q24
 
-@test "D22: pm start starts hc serve in a labeled container after podman start" {
+@test "Q24: pm start runs podman start only, also for a pm-hc container" {
   fake_container pm-x pm-x
+  printf 'exited\n' >"$STUB_STATE/status/pm-x"
   run --separate-stderr pm start pm-x
   expect_status 0
-  local s
-  podman_find -x start -- pm-x
-  s=$FOUND
-  hc_serve_call pm-x || { podman_show; fail 'no hc serve'; }
-  (( FOUND > s ))
-  has_line "$output" 'ok    hc serve started in pm-x'
-}
-
-@test "D22: no hc serve for an unlabeled container or after a failed podman start" {
-  fake_container pm-y
-  run --separate-stderr pm start pm-y
-  expect_status 0
-  if podman_find exec; then podman_show; fail 'hc serve in an unlabeled container'; fi
-  fake_container pm-x pm-x
+  [ "$output" = pm-x ] || fail "output: $output"
+  podman_find -x start -- pm-x || { podman_show; fail 'no podman start'; }
+  no_hc_serve
+  if podman_find exec; then podman_show; fail 'pm start ran podman exec'; fi
   STUB_START_RC=125 run --separate-stderr pm start pm-x
-  [ "$status" -ne 0 ]
-  if podman_find exec; then podman_show; fail 'hc serve after a failed start'; fi
+  expect_status 125
 }
 
 @test "D25: pm help, pm start --help, and pm rm --help tell about the hc handling" {
   run pm help
   expect_status 0
-  has_line "$output" '  start      <container>    and hc serve for a pm run --hc container'
+  has_line "$output" '  start      <container>'
   has_line "$output" '  rm         [--force] <container>  remove it, its pm network once unused, and its hc machine'
   run pm start --help
   expect_status 0
-  [[ $output == *'podman exec -d -e SHELL=/bin/bash <container> hc serve'* && $output == *pm-hc* ]] \
+  [[ $output == *'podman start <container>'* && $output == *'first hc command'* && $output != *'hc serve'* ]] \
     || fail "pm start --help: $output"
   run pm rm --help
   expect_status 0
   [[ $output == *'hc machine rm <container>'* && $output == *pm-hc* ]] || fail "pm rm --help: $output"
-}
-
-@test "D22: a failing hc serve after pm start is a red error with its output" {
-  fake_container pm-x pm-x
-  export STUB_EXEC_RC=127 STUB_EXEC_ERR='Error: crun: executable file `hc` not found'
-  run --separate-stderr pm start pm-x
-  expect_status 1
-  has_line "$stderr" "error pm-x: hc serve: $STUB_EXEC_ERR"
 }

@@ -315,20 +315,6 @@ _pm_hc_entry() {
   return 2
 }
 
-# start the core in container $1, with the same lines in pm run and pm
-# start: hc serve runs in the foreground, hence -d, and sleep infinity
-# stays the main process; podman sets no SHELL, and the core starts new
-# shells from its own, else /bin/sh; a running core makes it exit at once
-_pm_hc_serve() {
-  local out
-  if out=$(podman exec -d -e SHELL=/bin/bash -- "$1" hc serve 2>&1); then
-    _pm_ok "hc serve started in $1"
-  else
-    _pm_err "$1: hc serve: $out"
-    return 1
-  fi
-}
-
 # add container $1 to hc on this host as the machine of the same name,
 # through podman exec, with no stdin and no --install, so hc never asks and
 # never copies itself there; a machine of that name stays with pm's
@@ -461,9 +447,9 @@ pm_run() {
   --cp              pass the GitHub Copilot token (pm secret-cp) as a podman
                     secret, and copy the instructions, settings, and
                     config as pm cp-copilot
-  --hc              give the container a stable herdr-core identity, start
-                    the core in it, and add it to hc here as a machine;
-                    needs --mount, see herdr-core
+  --hc              give the container a stable herdr-core identity and
+                    add it to hc here as a machine, whose connection
+                    starts the core; needs --mount, see herdr-core
   --mount <dir>     mount <dir> at /workspaces/<foldername> and, if it exists,
   --mnt <dir>       <dir>/../<foldername>.worktrees at
                     /workspaces/<foldername>.worktrees; unless a name is given,
@@ -506,30 +492,32 @@ herdr-core:
     state folder  ~/.config/herdr-core/container/<foldername>-<sha256 of id>
   pm writes a missing or invalid id file, creates a missing state folder,
   mounts the id file at /etc/machine-id (read-only) and the state folder at
-  /home/vscode/.local/state/herdr-core, and after podman run starts the
-  core with: podman exec -d -e SHELL=/bin/bash <container> hc serve
-  then pm adds the container to hc on this host as the hc machine
+  /home/vscode/.local/state/herdr-core, and sets SHELL=/bin/bash in the
+  container, as podman sets none and the core starts new shells from its
+  own; pm starts no core: the hc machine connection starts it, also when
+  hc reconnects after pm start, and without hc here the first hc command
+  in the container does
+  after podman run, pm adds the container to hc on this host as the hc machine
   <container-name>, connected through podman exec; it keeps a machine of
   that name with this connection, replaces one that reaches the container
   through another podman path (podman moved), stops with an error for any
   other, and only notes when hc is not on PATH; the hc machine ls it runs
   first starts the core on this host when none runs
-  the label pm-hc=<container-name> marks the container: pm start starts
-  its core again, pm stop stops it first, and pm rm removes its hc
-  machine; podman sets labels only at creation, so containers made without
-  --hc or by an older pm get no herdr-core handling until made again with
-  pm run --hc
+  the label pm-hc=<container-name> marks the container: pm stop stops its
+  core first, and pm rm removes its hc machine; podman sets labels only at
+  creation, so containers made without --hc or by an older pm get no
+  herdr-core handling until made again with pm run --hc
   pm keeps the id file and the state folder on rollback and on pm rm
 
 runs: podman network create -o isolate=strict --label pm-script=$PM_VERSION <network>
       podman run -d --init --userns=keep-id --label pm-script=$PM_VERSION
-      [--label pm-hc=<container-name>] [--network <network>] [-v ...]
-      [--secret ...] --name <container-name> <image> sleep infinity
+      [--label pm-hc=<container-name> -e SHELL=/bin/bash]
+      [--network <network>] [-v ...] [--secret ...]
+      --name <container-name> <image> sleep infinity
       with --cc: as pm cp-claude, CLAUDE.md and settings into ~/.claude
       with --cp: as pm cp-copilot, instructions, settings, and config.json
         into ~/.copilot
-      with --hc: podman exec -d -e SHELL=/bin/bash <container-name> hc serve
-      hc machine add --name <container-name>
+      with --hc: hc machine add --name <container-name>
         --via '<podman> exec -i <container-name> sh -c'
 then: pm bash <container-name>"
   # --init forwards signals to `sleep infinity`, so pm stop does not wait
@@ -665,12 +653,14 @@ then: pm bash <container-name>"
   fi
 
   # herdr-core files are ready before pm creates anything in podman; the
-  # label lets pm start and pm rm find containers made with --hc
+  # label lets pm stop, pm rm, and pm hc-add find containers made with --hc;
+  # SHELL reaches every core start in the container, whoever starts it, as
+  # podman sets none and the core starts new shells from its own
   if (( hc )); then
     _pm_hc_prepare "$abs" || return 1
     opts+=(-v "$_pm_hc_file:/etc/machine-id:ro"
       -v "$_pm_hc_state:/home/vscode/.local/state/herdr-core"
-      --label "pm-hc=$name")
+      --label "pm-hc=$name" -e SHELL=/bin/bash)
   fi
 
   # one --secret per requested token; podman exposes each as an env var
@@ -717,15 +707,13 @@ then: pm bash <container-name>"
   trap - INT
 
   # the agent files as pm cp-claude and pm cp-copilot copy them, then the
-  # herdr-core core and the hc machine on this host; a failed copy still
-  # lets the later steps run, and the container stays on any failure
+  # hc machine on this host, whose connection starts the core; a failed
+  # copy still lets the later steps run, and the container stays on any
+  # failure
   local rc=0
   if (( cc )); then _pm_put_claude "$name" || rc=1; fi
   if (( cp )); then _pm_put_copilot "$name" || rc=1; fi
-  if (( hc )); then
-    _pm_hc_serve "$name" || return 1
-    _pm_hc_add "$name" 'pm run' || rc=1
-  fi
+  if (( hc )); then _pm_hc_add "$name" 'pm run' || rc=1; fi
   return $rc
 }
 
@@ -748,20 +736,13 @@ pm_start() {
   <container>  container to start; completion lists non-running containers
 
 runs: podman start <container>
-      for a container made with pm run --hc (label pm-hc), then:
-      podman exec -d -e SHELL=/bin/bash <container> hc serve
-note: containers keep the labels, mounts, and secrets they were created
-      with; podman sets labels only at creation, so a container made
-      without --hc or by an older pm gets no hc serve'
-  local hcname
+note: pm starts no herdr-core core; in a container made with pm run --hc,
+      it starts when needed: when hc on this host connects to the machine
+      again, or with the first hc command in the container; containers
+      keep the labels, mounts, and secrets they were created with'
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
   if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
-  podman start -- "$1" || return
-  # a container made with pm run --hc gets its core back; with the core
-  # still running, the new hc serve exits at once
-  hcname=$(podman container inspect --format '{{json (index .Config.Labels "pm-hc")}}' -- "$1" 2>/dev/null) \
-    || return 0
-  [[ $hcname == '""' ]] || _pm_hc_serve "$1"
+  podman start -- "$1"
 }
 
 # stop the core in running container $1 before podman stop, which signals
@@ -990,17 +971,16 @@ pm_hc_add() {
   local help="usage: pm hc-add <container>
 
 adds a container made with pm run --hc to hc on this host as the hc machine
-named in its label pm-hc, as pm run --hc does: it starts hc serve first (a
-running core makes it exit at once), then runs hc machine add; it keeps a
-machine of that name with pm's connection, stops with an error for one
-with another, and replaces one that connects through another podman path,
-so it repairs the machine after podman moved
+named in its label pm-hc, as pm run --hc does, and the machine connection
+starts the core there; it keeps a machine of that name with pm's
+connection, stops with an error for one with another, and replaces one
+that connects through another podman path, so it repairs the machine
+after podman moved
 
   <container>  running container with the label pm-hc; completion lists
                those
 
-runs: podman exec -d -e SHELL=/bin/bash <container> hc serve
-      hc machine add --name <name> --via '<podman> exec -i <name> sh -c'
+runs: hc machine add --name <name> --via '<podman> exec -i <name> sh -c'
 needs: hc on PATH
 note: the hc machine ls before hc machine add starts the hc core on this
       host when none runs"
@@ -1017,7 +997,6 @@ note: the hc machine ls before hc machine add starts the hc core on this
     _pm_err "no hc on PATH; install it on this host to add $m as an hc machine"
     return 1
   fi
-  _pm_hc_serve "$1" || return 1
   _pm_hc_add "$m" 'pm hc-add'
 }
 
@@ -1404,7 +1383,7 @@ table columns:
   NETWORK     its networks, else its network mode in parentheses
   CONT-HERDR  experimental: running when an hc serve or herdr-core serve
               process runs in the container, stopped when it has hc but no
-              core or does not run, unavailable when it runs without hc;
+              core yet or does not run, unavailable when it runs without hc;
               one podman exec per running container, at most 5 at a time
   HOST-HERDR  experimental: yes when hc on this host has the machine that
               pm adds for it, no when not, also when it connects through
@@ -2062,7 +2041,7 @@ pm_usage() {
     '       pm <subcommand> --help' \
     '' \
     '  run        [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]' \
-    '  start      <container>    and hc serve for a pm run --hc container' \
+    '  start      <container>' \
     '  stop       <container>    after hc server stop for a pm run --hc container' \
     '  bash       <container>    interactive bash terminal in a running container' \
     '  rm         [--force] <container>  remove it, its pm network once unused, and its hc machine' \
@@ -2178,12 +2157,14 @@ GIT WORKTREES
 
 HERDR-CORE
 
-  pm run --hc gives the container a stable herdr-core identity, starts
-  the core in it with podman exec -d -e SHELL=/bin/bash <container> hc serve
-  (podman sets no SHELL, and the core starts new shells from its own), and
-  adds the container to hc on this host as the hc machine of the same name,
-  connected through podman exec, so the Herdr app reaches it. The name must
-  then suit hc: 1-32 of a-z 0-9 - _ ., a letter or digit first, not like t7.
+  pm run --hc gives the container a stable herdr-core identity, sets
+  SHELL=/bin/bash in it (podman sets no SHELL, and the core starts new
+  shells from its own), and adds the container to hc on this host as the
+  hc machine of the same name, connected through podman exec, so the Herdr
+  app reaches it. The name must then suit hc: 1-32 of a-z 0-9 - _ ., a
+  letter or digit first, not like t7. pm starts no core: the machine
+  connection starts it, also when hc connects again after pm start, and
+  without hc on this host the first hc command in the container does.
   The identity lives on the host in an id file, mounted read-only at
   /etc/machine-id, and a state folder, mounted at
   /home/vscode/.local/state/herdr-core:
@@ -2198,9 +2179,9 @@ HERDR-CORE
     ~/src/myapp/herdr-machine-id
     ~/.config/herdr-core/container/myapp-<sha256 of the id>
 
-  Such a container carries the label pm-hc=<container>: pm start starts its
-  core again, pm stop stops it first with hc server stop, so that it saves
-  its state, and pm rm removes its hc machine. podman sets labels only
+  Such a container carries the label pm-hc=<container>: pm stop stops its
+  core first with hc server stop, so that it saves its state, and pm rm
+  removes its hc machine. podman sets labels only
   when it creates a container, so a container made without --hc or by an
   older pm gets none of this; make it again with pm run --hc. Without hc on
   PATH, pm adds no machine and says so. pm hc-add <container> adds the

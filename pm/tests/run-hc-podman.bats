@@ -117,19 +117,28 @@ print(json.load(sys.stdin)["core"]["id"])' 2>/dev/null); then
   fail "hc server status in $1 reports no core id"
 }
 
-# hc_serve_running <container>: wait up to 30 s for a process `hc serve`
-hc_serve_running() {
+# core_procs <container>: the command lines of the core processes there,
+# hc serve or herdr-core serve, whoever started them; status 1 for none
+core_procs() {
+  podman exec "$1" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\000" " " <"$f"; echo; done' \
+    2>/dev/null | grep -E '(^|/)(hc|herdr-core) serve( |$)'
+}
+
+# core_running <container>: wait up to 30 s for a core process
+core_running() {
   local i
   for (( i = 0; i < 60; i++ )); do
-    if { podman top "$1" args 2>/dev/null
-      podman exec "$1" sh -c 'for f in /proc/[0-9]*/cmdline; do tr "\000" " " <"$f"; echo; done' 2>/dev/null
-    } | grep -Eq '(^|[[:space:]/])hc serve( |$)'; then
-      return 0
-    fi
+    core_procs "$1" >/dev/null && return 0
     sleep 0.5
   done
   podman top "$1" args >&2 || true
-  fail "no hc serve process in $1"
+  fail "no core process in $1"
+}
+
+# no_core <container>: no core process runs there, a second after the call
+no_core() {
+  sleep 1
+  ! core_procs "$1" >/dev/null || { podman top "$1" args >&2; fail "a core runs in $1"; }
 }
 
 # term_reason <state> <name>: how the core recorded the end of terminal
@@ -165,22 +174,25 @@ for m in json.load(sys.stdin)["machines"]:
         print(m["target"], m["via"])' "$1"
 }
 
-# hc_serve_shell <container>: SHELL in the environment of the running
-# hc serve process, from /proc/<pid>/environ inside the container
-hc_serve_shell() {
+# core_shell <container>: SHELL in the environment of the running core,
+# from /proc/<pid>/environ inside the container
+core_shell() {
   podman exec "$1" sh -c '
     for p in /proc/[0-9]*; do
-      [ "$(tr "\000" " " <"$p/cmdline" 2>/dev/null)" = "hc serve " ] || continue
+      case $(tr "\000" " " <"$p/cmdline" 2>/dev/null) in
+        "hc serve "|*"/hc serve "|"herdr-core serve "|*"/herdr-core serve ") ;;
+        *) continue ;;
+      esac
       tr "\000" "\n" <"$p/environ" | sed -n "s/^SHELL=//p"
       exit 0
     done
     exit 1'
 }
 
-@test "pm run --hc: mounts, hc serve, core.json; the identity survives pm rm --force" {
+@test "pm run --hc: mounts; without host hc a core at the first hc command, with bash; the identity survives pm rm --force" {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
-  has_line "$output" "ok    hc serve started in $CTR"
+  [[ $output$stderr != *'hc serve'* ]] || fail "output: $output$stderr"
   local f=$DIR/herdr-machine-id id state mounts ids mid core_id core_id2
   id=$(<"$f")
   is_id "$id"
@@ -199,11 +211,13 @@ hc_serve_shell() {
   [[ -e $state/.pm-test-rw ]]
   rm -f -- "$state/.pm-test-rw"
 
-  hc_serve_running "$CTR"
-  # podman sets no SHELL; pm passes it, as the core starts new shells from it
-  local shell
-  shell=$(hc_serve_shell "$CTR") || fail 'cannot read the environment of hc serve'
-  [ "$shell" = /bin/bash ] || fail "hc serve runs with SHELL=$shell"
+  # without hc on this host, no core runs until the first hc command in the
+  # container; that core gets SHELL=/bin/bash from the container's
+  # environment, as podman sets none and the core starts new shells from it
+  no_core "$CTR"
+  podman exec "$CTR" hc ls >/dev/null
+  core_running "$CTR"
+  [ "$(core_shell "$CTR")" = /bin/bash ] || fail "the core runs with SHELL=$(core_shell "$CTR")"
   ids=$(core_ids "$state")
   read -r mid core_id <<<"$ids"
   [ "$mid" = "$id" ] || fail "machine_id $mid, id file $id"
@@ -220,7 +234,8 @@ hc_serve_shell() {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
   [[ $stderr != *'new herdr-core state folder'* ]] || fail "$stderr"
-  hc_serve_running "$CTR"
+  podman exec "$CTR" hc ls >/dev/null
+  core_running "$CTR"
   core_started "$state" "$BATS_TEST_TMPDIR/second-run"
   ids=$(core_ids "$state")
   read -r mid core_id2 <<<"$ids"
@@ -243,7 +258,8 @@ hc_serve_shell() {
   suffix=${states[0]##*/"$NAME"-}
   [[ $suffix =~ ^[0123456789abcdefghijklmnopqrstuv]{52}$ ]] || fail "suffix $suffix"
   if [[ -n $NODE ]]; then [ "$suffix" = "$(ref_id "$DIR")" ]; fi
-  hc_serve_running "$CTR"
+  podman exec "$CTR" hc ls >/dev/null
+  core_running "$CTR"
   ids=$(core_ids "${states[0]}")
   read -r mid _ <<<"$ids"
   [ "$mid" = "$id" ] || fail "machine_id $mid, id file $id"
@@ -267,28 +283,32 @@ hc_serve_shell() {
   podman container exists -- "$CTR2-2"
 }
 
-@test "pm run --hc adds a real hc machine; pm start brings hc serve back; pm rm --force drops the machine" {
+@test "pm run --hc adds a real hc machine, whose connection starts the core with bash; it does so again after pm stop and pm start" {
   use_host_hc
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
   has_line "$output" "ok    hc machine $CTR added"
+  [[ $output$stderr != *'hc serve'* ]] || fail "output: $output$stderr"
   [ "$(host_machine "$CTR")" = "$(command -v podman) exec -i $CTR sh -c True" ] \
     || fail "machine: $(hc machine ls --json)"
+  # the add's connection started the core, with SHELL=/bin/bash from the
+  # container's environment
+  core_running "$CTR"
+  [ "$(core_shell "$CTR")" = /bin/bash ] || fail "the core runs with SHELL=$(core_shell "$CTR")"
   # hc on the host reaches the container through the via connection
   run --separate-stderr hc exec --on "$CTR" uname -a
   expect_status 0
   [[ $output == Linux* ]] || fail "uname: $output"
 
-  # pm start brings the core back, with SHELL=/bin/bash
+  # pm start starts no core; hc on the host connects again and its
+  # connection starts one, again with SHELL=/bin/bash
   run --separate-stderr pm stop "$CTR"
   expect_status 0
   run --separate-stderr pm start "$CTR"
   expect_status 0
-  has_line "$output" "ok    hc serve started in $CTR"
-  hc_serve_running "$CTR"
-  local shell
-  shell=$(hc_serve_shell "$CTR") || fail 'cannot read the environment of hc serve'
-  [ "$shell" = /bin/bash ] || fail "hc serve runs with SHELL=$shell"
+  [ "$output" = "$CTR" ] || fail "output: $output"
+  core_running "$CTR"
+  [ "$(core_shell "$CTR")" = /bin/bash ] || fail "the core runs with SHELL=$(core_shell "$CTR")"
 
   # pm rm --force removes the container and its machine
   run --separate-stderr pm rm --force "$CTR"
@@ -319,10 +339,12 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   expect_status 0
   has_line "$stderr" "pm run: note: no hc on PATH, so $CTR is not added as an hc machine; add it later with: pm hc-add $CTR"
   use_host_hc
-  # hc on PATH, but no host core yet: pm ps shows stopped and starts none
+  # hc on PATH, but no host core yet: pm ps shows stopped and starts none;
+  # nothing has started the container's core either
   run --separate-stderr pm ps
   expect_status 0
   [ "$(ps_cell HOST-HERDR "$(real_row "$CTR")")" = stopped ] || fail "output: $output"
+  [ "$(ps_cell CONT-HERDR "$(real_row "$CTR")")" = stopped ] || fail "output: $output"
   [ ! -e "$HC_SOCKET" ] || fail 'pm ps started a host core'
   run --separate-stderr pm hc-add "$CTR"
   expect_status 0
@@ -463,8 +485,9 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
 @test "pm doctor does not count the core of a keep-id container as the host's" {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
-  hc_serve_running "$CTR"
-  # the container's hc serve runs as this user, in another pid namespace
+  podman exec "$CTR" hc ls >/dev/null
+  core_running "$CTR"
+  # the container's core runs as this user, in another pid namespace
   run --separate-stderr pm doctor
   has_line "$output" 'failed hc core not running (starts on first hc use)'
 }
@@ -508,13 +531,13 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   [ "$(ps_cell CONT-HERDR "$r")" = unavailable ] || fail "row: $r"
 }
 
-@test "pm stop stops the core first, so it records how its terminals ended; pm start brings it back" {
+@test "pm stop stops the core first, so it records how its terminals ended; the next hc command brings it back" {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
-  hc_serve_running "$CTR"
   local core_id state
   local -a states=("$HC/$NAME"-*)
   state=${states[0]}
+  # hc server status is the first hc command here: it starts the core
   core_id=$(running_core_id "$CTR")
   # a live terminal just before pm stop, within the 2 s in which the core
   # saves a change; only a core that stops by itself ends it as server_stop
@@ -526,11 +549,11 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   [ "$(term_reason "$state" pm-stop)" = 'finished server_stop' ] \
     || fail "terminal: $(term_reason "$state" pm-stop)"
 
-  # pm start brings the same core back
+  # pm start starts no core; the next hc command brings the same one back
   run --separate-stderr pm start "$CTR"
   expect_status 0
-  has_line "$output" "ok    hc serve started in $CTR"
-  hc_serve_running "$CTR"
+  [ "$output" = "$CTR" ] || fail "output: $output"
+  no_core "$CTR"
   [ "$(running_core_id "$CTR")" = "$core_id" ]
 
   # with no core running, pm stop says so, starts none, and stops anyway

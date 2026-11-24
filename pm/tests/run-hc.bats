@@ -487,25 +487,20 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   if podman_find exec; then fail 'unexpected podman exec'; fi
 }
 
-@test "S11: after podman run, pm starts hc serve detached with SHELL=/bin/bash" {
+@test "Q24: pm run --hc puts SHELL=/bin/bash in the container's environment and starts no hc serve" {
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
-  local r
-  podman_find run
-  r=$FOUND
-  hc_serve_call pm-proj || { podman_show; fail 'no podman exec -d -e SHELL=/bin/bash -- pm-proj hc serve'; }
-  (( FOUND > r ))
-  has_line "$output" 'ok    hc serve started in pm-proj'
-}
-
-@test "S11: a failed hc serve is an error with its output; the container stays" {
-  export STUB_EXEC_RC=127
-  export STUB_EXEC_ERR='Error: crun: executable file `hc` not found in $PATH'
-  run --separate-stderr pm run --hc --mount "$P" "$IMG"
-  expect_status 1
-  has_line "$stderr" "error pm-proj: hc serve: $STUB_EXEC_ERR"
-  if podman_find rm || podman_find network rm; then podman_show; fail 'pm rolled back'; fi
-  [[ -e $STUB_STATE/containers/pm-proj ]]
+  run_args
+  has_opt -e SHELL=/bin/bash
+  no_hc_serve
+  [[ $output$stderr != *'hc serve'* ]] || fail "output: $output$stderr"
+  # without --hc, pm sets no SHELL
+  forget_containers
+  : >"$PODMAN_LOG"
+  run --separate-stderr pm run --mount "$P" "$IMG" plain
+  expect_status 0
+  run_args
+  if has_opt -e SHELL=/bin/bash 2>/dev/null; then fail 'SHELL=/bin/bash without --hc'; fi
 }
 
 # ------------------------------------------------------------------ S12
@@ -582,13 +577,13 @@ esac'
   section=${section%%$'\n'runs:*}
   for s in '<dir>/.devcontainer/herdr-machine-id' '<dir>/herdr-machine-id' \
     '.config/herdr-core/container/<foldername>-<devcontainerId>' sha256 \
-    /etc/machine-id "$STATE_TARGET" \
-    'podman exec -d -e SHELL=/bin/bash <container> hc serve' \
+    /etc/machine-id "$STATE_TARGET" SHELL=/bin/bash 'first hc command' \
     'hc machine' 'pm-hc=<container-name>' 'pm start' rollback 'pm rm'; do
     [[ $section == *"$s"* ]] || fail "the herdr-core section lacks: $s"
   done
-  # the runs block lists the start command and the hc machine too
-  has_line "$output" '      with --hc: podman exec -d -e SHELL=/bin/bash <container-name> hc serve'
+  # Q24: the runs block sets SHELL with --hc and starts no hc serve
+  [[ $output == *'[--label pm-hc=<container-name> -e SHELL=/bin/bash]'* ]] || fail 'runs: lacks SHELL'
+  [[ $output != *'hc serve'* ]] || fail "the help still starts hc serve: $output"
   [[ $output == *'hc machine add --name <container-name>'* ]] || fail 'runs: lacks hc machine add'
   # D23: one container per folder, with its limits
   has_line "$output" 'one container per folder:'
@@ -613,7 +608,7 @@ esac'
   section=${section%%$'\n'[A-Z]*}
   for s in --hc /etc/machine-id .devcontainer/herdr-machine-id \
     .config/herdr-core/container/ 'one at a time' 'VS Code' git \
-    'podman exec -d -e SHELL=/bin/bash <container> hc serve' \
+    SHELL=/bin/bash 'first hc command' \
     'only one core runs per state folder' .devcontainer/devcontainer.json \
     '.devcontainer/<name>/devcontainer.json' 'hc exec --on' 'pm-hc=' \
     'pm start' 'pm rm'; do

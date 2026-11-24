@@ -16,15 +16,14 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
 
 # ------------------------------------------------------------------ hc-add
 
-@test "hc-add: starts hc serve, then adds the machine named by the label" {
+@test "hc-add: adds the machine named by the label, whose connection starts the core, not pm" {
   fake_container pm-x pm-x
   run --separate-stderr pm hc-add pm-x
   expect_status 0
-  hc_serve_call pm-x || { podman_show; fail 'no hc serve'; }
+  no_hc_serve
   hc_find -x machine add --name pm-x --via "$(pm_via pm-x)" || { hc_show; fail 'no hc machine add'; }
   [ "$(<"$HC_LOG.stdin")" = devnull ]
-  [ "$output" = 'ok    hc serve started in pm-x
-ok    hc machine pm-x added' ] || fail "output: $output"
+  [ "$output" = 'ok    hc machine pm-x added' ] || fail "output: $output"
 }
 
 @test "hc-add: a machine with pm's connection stays, with a note" {
@@ -140,7 +139,7 @@ ok    hc machine pm-x added' ] || fail "output: $output"
   s=$FOUND
   hc_find -x machine add --name pm-x --via "$(pm_via pm-x)" || { hc_show; fail 'no hc machine add'; }
   (( FOUND > s )) || { hc_show; fail 'hc machine add before hc machine rm'; }
-  [ "$output" = $'ok    hc serve started in pm-x\nok    hc machine pm-x added' ] || fail "output: $output"
+  [ "$output" = 'ok    hc machine pm-x added' ] || fail "output: $output"
   : >"$HC_LOG"
   run --separate-stderr pm hc-rm pm-x
   expect_status 0

@@ -48,19 +48,18 @@ fs() { printf '%s\n' "$STUB_STATE/fs/pm-proj$1"; }
   has_line "$output" "ok    $PM_COPILOT_SETTINGS -> pm-proj:/home/vscode/.copilot/settings.json"
 }
 
-@test "run --cc --cp --hc: copy cc, copy cp, hc serve, then the machine" {
+@test "run --cc --cp --hc: copy cc, copy cp, then the machine" {
   run --separate-stderr pm run --cc --cp --hc --mount "$P" "$IMG"
   expect_status 0
-  local r cc cp hs
+  local r cc cp
   podman_find run
   r=$FOUND
   podman_find -x cp -- "$PM_CLAUDE_MD" pm-proj:/home/vscode/.claude/CLAUDE.md
   cc=$FOUND
   podman_find -x cp -- "$PM_CLAUDE_MD" pm-proj:/home/vscode/.copilot/copilot-instructions.md
   cp=$FOUND
-  hc_serve_call pm-proj
-  hs=$FOUND
-  (( r < cc && cc < cp && cp < hs )) || { podman_show; fail "order: run $r, cc $cc, cp $cp, hc serve $hs"; }
+  (( r < cc && cc < cp )) || { podman_show; fail "order: run $r, cc $cc, cp $cp"; }
+  no_hc_serve
   hc_find machine add || { hc_show; fail 'no hc machine add'; }
   # the machine comes last in the output
   [[ ${output##*$'\n'} == 'ok    hc machine pm-proj added' ]] || fail "output: $output"
@@ -79,7 +78,6 @@ fs() { printf '%s\n' "$STUB_STATE/fs/pm-proj$1"; }
   run --separate-stderr pm run --cc --hc --mount "$P" "$IMG"
   expect_status 1
   has_line "$stderr" "error $PM_CLAUDE_MD: not found"
-  hc_serve_call pm-proj || { podman_show; fail 'no hc serve after the failed copy'; }
   hc_find machine add || { hc_show; fail 'no hc machine add after the failed copy'; }
   if podman_find rm; then podman_show; fail 'pm removed the container'; fi
   printf 'rules\n' >"$PM_CLAUDE_MD"

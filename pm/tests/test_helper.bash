@@ -168,9 +168,15 @@ count_v() {
   echo "$n"
 }
 
-# hc_serve_call <container>: find the exact call that starts the core
-hc_serve_call() {
-  podman_find -x exec -d -e SHELL=/bin/bash -- "$1" hc serve
+# no_hc_serve: fail when pm ran hc serve in any container; since Q24 the
+# core starts when needed, through the hc machine connection or the first
+# hc command in the container
+no_hc_serve() {
+  local i re='(^| )hc serve( |$)'
+  podman_load
+  for (( i = 0; i < ${#CALLS[@]}; i++ )); do
+    [[ ! ${CALLS[i]} =~ $re ]] || { podman_show >&2; fail 'pm ran hc serve'; }
+  done
 }
 
 # fake_container <name> [<pm-hc label> [<mount source>...]]: a fake

@@ -89,7 +89,7 @@ core_stop_call() { podman_find -x exec -- "$1" hc server stop --json; }
   if podman_find exec; then podman_show; fail 'exec for an unknown container'; fi
 }
 
-@test "pm stop, then pm start: the core comes back" {
+@test "pm stop, then pm start: pm starts no core, which comes back when hc needs it" {
   fake_container pm-x pm-x
   : >"$STUB_STATE/cores/pm-x"
   run --separate-stderr pm stop pm-x
@@ -97,8 +97,9 @@ core_stop_call() { podman_find -x exec -- "$1" hc server stop --json; }
   [ ! -e "$STUB_STATE/cores/pm-x" ]
   run --separate-stderr pm start pm-x
   expect_status 0
-  has_line "$output" 'ok    hc serve started in pm-x'
-  [ -e "$STUB_STATE/cores/pm-x" ]
+  [ "$output" = pm-x ] || fail "output: $output"
+  no_hc_serve
+  [ ! -e "$STUB_STATE/cores/pm-x" ]
 }
 
 @test "pm stop: --help and pm help tell about the core stop; usage errors as before" {

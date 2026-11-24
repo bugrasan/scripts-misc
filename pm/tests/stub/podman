@@ -11,7 +11,8 @@
 #   pmscript/<name>    the value of its pm-script label
 #   create/<name>      its podman run arguments, each ended by a NUL
 #   secrets/<name>     its mount secrets, one name per line
-#   cores/<name>       present while hc serve runs in it
+#   cores/<name>       present while a core runs in it (tests make it, as
+#                      pm starts none; podman stop ends it)
 #   nohc/<name>        present when it has no hc
 #   nosha/<name>       present when it has no sha256sum
 #   fs/<name>/...      its files, from podman cp
@@ -24,8 +25,6 @@
 #                       container created, as podman does (default 0)
 #   STUB_START_RC       exit status of `start` (default 0)
 #   STUB_STOP_RC        exit status of `stop` (default 0)
-#   STUB_EXEC_RC        exit status of `exec ... hc serve` (default 0)
-#   STUB_EXEC_ERR       text `exec ... hc serve` prints to stderr
 #   STUB_HCSTOP_RC      exit status of `exec ... hc server stop`; it then
 #                       prints STUB_HCSTOP_OUT to stderr
 #   STUB_HCSTOP_OUT     without STUB_HCSTOP_RC: what it prints instead of
@@ -222,12 +221,6 @@ case ${1-} in
       if [[ ${args[i]} == -- ]]; then ctr=${args[i+1]}; break; fi
     done
     case $* in
-      *' hc serve')
-        [[ -z ${STUB_EXEC_ERR-} ]] || printf '%s\n' "$STUB_EXEC_ERR" >&2
-        [[ ${STUB_EXEC_RC:-0} == 0 ]] || exit "$STUB_EXEC_RC"
-        : >"$s/cores/$ctr"
-        echo fedcba9876543210fedcba9876543210
-        exit 0 ;;
       *' hc server stop --json')
         # pm stop: hc stops the core when one runs, as hc does
         if [[ -n ${STUB_HCSTOP_RC-} ]]; then
