@@ -48,17 +48,19 @@ fs() { printf '%s\n' "$STUB_STATE/fs/pm-proj$1"; }
   has_line "$output" "ok    $PM_COPILOT_SETTINGS -> pm-proj:/home/vscode/.copilot/settings.json"
 }
 
-@test "run --cc --cp --hc: copy cc, copy cp, then the machine" {
+@test "run --cc --cp --hc: copy cc, copy cp, the hc config, then the machine" {
   run --separate-stderr pm run --cc --cp --hc --mount "$P" "$IMG"
   expect_status 0
-  local r cc cp
+  local r cc cp hc
   podman_find run
   r=$FOUND
   podman_find -x cp -- "$PM_CLAUDE_MD" pm-proj:/home/vscode/.claude/CLAUDE.md
   cc=$FOUND
   podman_find -x cp -- "$PM_CLAUDE_MD" pm-proj:/home/vscode/.copilot/copilot-instructions.md
   cp=$FOUND
-  (( r < cc && cc < cp )) || { podman_show; fail "order: run $r, cc $cc, cp $cp"; }
+  podman_find exec -i -- pm-proj sh -c || { podman_show; fail 'no config write'; }
+  hc=$FOUND
+  (( r < cc && cc < cp && cp < hc )) || { podman_show; fail "order: run $r, cc $cc, cp $cp, config $hc"; }
   no_hc_serve
   hc_find machine add || { hc_show; fail 'no hc machine add'; }
   # the machine comes last in the output
@@ -145,14 +147,15 @@ fs() { printf '%s\n' "$STUB_STATE/fs/pm-proj$1"; }
   [[ $output == *PM_COPILOT_CONFIG* ]] || fail "help: $output"
 }
 
-@test "C3: PM_COPILOT_CONFIG is listed with the other PM_* variables" {
-  export PM_COPILOT_CONFIG=$T/copilot-config.json
+@test "C3: PM_COPILOT_CONFIG and PM_HC_SHELL are listed with the other PM_* variables" {
+  export PM_COPILOT_CONFIG=$T/copilot-config.json PM_HC_SHELL=/bin/zsh
   run pm help
   expect_status 0
-  [[ $output == *'environment: '*PM_COPILOT_SETTINGS*PM_COPILOT_CONFIG* ]] || fail "pm help: $output"
+  [[ $output == *'environment: '*PM_COPILOT_SETTINGS*PM_COPILOT_CONFIG*PM_HC_SHELL* ]] || fail "pm help: $output"
   run pm readme
   expect_status 0
   has_line "$output" "  PM_COPILOT_CONFIG    $PM_COPILOT_CONFIG"
+  has_line "$output" '  PM_HC_SHELL          /bin/zsh'
   run pm run --help
   expect_status 0
   [[ $output == *'with --cp: as pm cp-copilot, instructions, settings, and config.json'* ]] \

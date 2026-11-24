@@ -153,6 +153,13 @@ for t in json.load(open(sys.argv[1]))["terminals"].values():
         print(t.get("state"), t.get("reason"))' "$f" "$2"
 }
 
+# bare_agent <container>: what a bare hc run --bg starts there, as hc names
+# it (the shell's base name); it starts a core when none runs
+bare_agent() {
+  podman exec "$1" hc run --bg 2>/dev/null | python3 -I -c 'import json, sys
+print(json.load(sys.stdin)["agent"])'
+}
+
 # use_host_hc: the image's hc as this host's hc, with a core of its own:
 # XDG_STATE_HOME and HC_SOCKET below BATS_TEST_TMPDIR; XDG_RUNTIME_DIR and
 # XDG_CONFIG_HOME stay, as podman, which the core runs for the machine
@@ -189,7 +196,7 @@ core_shell() {
     exit 1'
 }
 
-@test "pm run --hc: mounts; without host hc a core at the first hc command, with bash; the identity survives pm rm --force" {
+@test "pm run --hc: mounts, the shell config; without host hc a core at the first hc command, bash by config; the identity survives pm rm --force" {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
   [[ $output$stderr != *'hc serve'* ]] || fail "output: $output$stderr"
@@ -211,13 +218,19 @@ core_shell() {
   [[ -e $state/.pm-test-rw ]]
   rm -f -- "$state/.pm-test-rw"
 
+  # pm wrote the core's shell into herdr-core's config; the container's
+  # environment keeps no SHELL
+  has_line "$output" "ok    $CTR:/home/vscode/.config/herdr-core/config.toml: shell = [\"/bin/bash\"]"
+  [ "$(podman exec "$CTR" cat /home/vscode/.config/herdr-core/config.toml)" = 'shell = ["/bin/bash"]' ]
+  [ "$(podman exec "$CTR" sh -c 'echo "${SHELL-unset}"')" = unset ]
   # without hc on this host, no core runs until the first hc command in the
-  # container; that core gets SHELL=/bin/bash from the container's
-  # environment, as podman sets none and the core starts new shells from it
+  # container; that core has no SHELL, and the config gives a bare hc run
+  # --bg bash all the same
   no_core "$CTR"
   podman exec "$CTR" hc ls >/dev/null
   core_running "$CTR"
-  [ "$(core_shell "$CTR")" = /bin/bash ] || fail "the core runs with SHELL=$(core_shell "$CTR")"
+  [ -z "$(core_shell "$CTR")" ] || fail "the core runs with SHELL=$(core_shell "$CTR")"
+  [ "$(bare_agent "$CTR")" = bash ] || fail "a bare hc run --bg starts: $(bare_agent "$CTR")"
   ids=$(core_ids "$state")
   read -r mid core_id <<<"$ids"
   [ "$mid" = "$id" ] || fail "machine_id $mid, id file $id"
@@ -283,7 +296,7 @@ core_shell() {
   podman container exists -- "$CTR2-2"
 }
 
-@test "pm run --hc adds a real hc machine, whose connection starts the core with bash; it does so again after pm stop and pm start" {
+@test "pm run --hc adds a real hc machine, whose connection starts the core, bash by config; again after pm stop and pm start" {
   use_host_hc
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
@@ -291,24 +304,24 @@ core_shell() {
   [[ $output$stderr != *'hc serve'* ]] || fail "output: $output$stderr"
   [ "$(host_machine "$CTR")" = "$(command -v podman) exec -i $CTR sh -c True" ] \
     || fail "machine: $(hc machine ls --json)"
-  # the add's connection started the core, with SHELL=/bin/bash from the
-  # container's environment
+  # the add's connection started the core, which has no SHELL; the config
+  # gives a bare hc run --bg bash
   core_running "$CTR"
-  [ "$(core_shell "$CTR")" = /bin/bash ] || fail "the core runs with SHELL=$(core_shell "$CTR")"
+  [ "$(bare_agent "$CTR")" = bash ] || fail "a bare hc run --bg starts: $(bare_agent "$CTR")"
   # hc on the host reaches the container through the via connection
   run --separate-stderr hc exec --on "$CTR" uname -a
   expect_status 0
   [[ $output == Linux* ]] || fail "uname: $output"
 
   # pm start starts no core; hc on the host connects again and its
-  # connection starts one, again with SHELL=/bin/bash
+  # connection starts one, whose bare hc run --bg is bash again
   run --separate-stderr pm stop "$CTR"
   expect_status 0
   run --separate-stderr pm start "$CTR"
   expect_status 0
   [ "$output" = "$CTR" ] || fail "output: $output"
   core_running "$CTR"
-  [ "$(core_shell "$CTR")" = /bin/bash ] || fail "the core runs with SHELL=$(core_shell "$CTR")"
+  [ "$(bare_agent "$CTR")" = bash ] || fail "a bare hc run --bg starts: $(bare_agent "$CTR")"
 
   # pm rm --force removes the container and its machine
   run --separate-stderr pm rm --force "$CTR"
@@ -565,4 +578,15 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   [ -z "$(find "$state" -name core.lock -newer "$BATS_TEST_TMPDIR/before-stop")" ] \
     || fail 'hc server stop started a core'
   [ "$(podman container inspect --format '{{.State.Status}}' -- "$CTR")" = exited ]
+}
+
+
+@test "PM_HC_SHELL picks the shell that a bare hc run --bg starts" {
+  local sh=/bin/sh
+  # zsh where the image has it, else sh: not bash either way
+  if podman run --rm -- "$IMG" test -x /bin/zsh >/dev/null 2>&1; then sh=/bin/zsh; fi
+  PM_HC_SHELL=$sh run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
+  expect_status 0
+  [ "$(podman exec "$CTR" cat /home/vscode/.config/herdr-core/config.toml)" = "shell = [\"$sh\"]" ]
+  [ "$(bare_agent "$CTR")" = "${sh##*/}" ] || fail "a bare hc run --bg starts: $(bare_agent "$CTR")"
 }

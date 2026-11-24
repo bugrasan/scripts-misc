@@ -38,6 +38,9 @@ unset CDPATH
 : "${PM_COPILOT_SETTINGS:=$HOME/.copilot/settings.json.template}"
 : "${PM_COPILOT_CONFIG:=$HOME/.copilot/config.json.template}"
 
+# The shell for new herdr-core shells in containers of `pm run --hc`.
+: "${PM_HC_SHELL:=/bin/bash}"
+
 # ------------------------------------------------------------------ helpers
 
 # print a usage block to stderr; callers return 2 afterwards
@@ -295,6 +298,28 @@ _pm_hc_via() {
   printf '%s exec -i %s sh -c\n' "$p" "$1"
 }
 
+# true when $1 suits PM_HC_SHELL: an absolute path that a TOML string holds
+# as is, so without ", \, or control characters
+_pm_hc_shell_ok() {
+  local LC_ALL=C
+  [[ $1 == /* && $1 != *[\"\\[:cntrl:]]* ]]
+}
+
+# give the core in container $1 the shell PM_HC_SHELL for its new shells,
+# whoever starts it, through herdr-core's own config.toml, so the container
+# keeps no SHELL for other tools; only when the file is missing (set -C);
+# written as the container user; an ok line, a skip line, or an error
+_pm_hc_config() {
+  local f=/home/vscode/.config/herdr-core/config.toml out rc=0
+  out=$(printf 'shell = ["%s"]\n' "$PM_HC_SHELL" | podman exec -i -- "$1" sh -c \
+    '[ ! -e "$1" ] || exit 3; mkdir -p -- "${1%/*}" && set -C && cat >"$1"' sh "$f" 2>&1) || rc=$?
+  case $rc in
+    0) _pm_ok "$1:$f: shell = [\"$PM_HC_SHELL\"]" ;;
+    3) _pm_skip "$1:$f: exists; kept" ;;
+    *) _pm_err "$1:$f: ${out//$'\n'/ }"; return 1 ;;
+  esac
+}
+
 # how hc's machine list $1 (hc machine ls --json: compact, flat objects,
 # no bare quote inside a string) knows machine $2: return 0 with the
 # connection command $3, 3 with pm's through another podman path (a via
@@ -492,11 +517,14 @@ herdr-core:
     state folder  ~/.config/herdr-core/container/<foldername>-<sha256 of id>
   pm writes a missing or invalid id file, creates a missing state folder,
   mounts the id file at /etc/machine-id (read-only) and the state folder at
-  /home/vscode/.local/state/herdr-core, and sets SHELL=/bin/bash in the
-  container, as podman sets none and the core starts new shells from its
-  own; pm starts no core: the hc machine connection starts it, also when
-  hc reconnects after pm start, and without hc here the first hc command
-  in the container does
+  /home/vscode/.local/state/herdr-core, and after podman run writes
+  ~/.config/herdr-core/config.toml in the container with
+  shell = [\"$PM_HC_SHELL\"] (PM_HC_SHELL) when that file is missing, else a
+  skip line: the core starts its new shells with it, whoever starts the
+  core, and the container's environment gets no SHELL, so other tools keep
+  theirs; pm starts no core: the hc machine connection starts it, also
+  when hc reconnects after pm start, and without hc here the
+  first hc command in the container does
   after podman run, pm adds the container to hc on this host as the hc machine
   <container-name>, connected through podman exec; it keeps a machine of
   that name with this connection, replaces one that reaches the container
@@ -511,13 +539,14 @@ herdr-core:
 
 runs: podman network create -o isolate=strict --label pm-script=$PM_VERSION <network>
       podman run -d --init --userns=keep-id --label pm-script=$PM_VERSION
-      [--label pm-hc=<container-name> -e SHELL=/bin/bash]
-      [--network <network>] [-v ...] [--secret ...]
-      --name <container-name> <image> sleep infinity
+      [--label pm-hc=<container-name>] [--network <network>] [-v ...]
+      [--secret ...] --name <container-name> <image> sleep infinity
       with --cc: as pm cp-claude, CLAUDE.md and settings into ~/.claude
       with --cp: as pm cp-copilot, instructions, settings, and config.json
         into ~/.copilot
-      with --hc: hc machine add --name <container-name>
+      with --hc: shell = [\"$PM_HC_SHELL\"] into ~/.config/herdr-core/config.toml
+        when missing, by podman exec -i <container-name> sh -c ...
+      hc machine add --name <container-name>
         --via '<podman> exec -i <container-name> sh -c'
 then: pm bash <container-name>"
   # --init forwards signals to `sleep infinity`, so pm stop does not wait
@@ -616,6 +645,11 @@ then: pm bash <container-name>"
     _pm_usage "pm run: hc cannot use $name as a machine name; with --hc, pass a <container-name> of 1-32 of a-z 0-9 - _ ., a letter or digit first, not like t7"
     return 2
   fi
+  # the core's shell goes into config.toml as is: checked before anything
+  if (( hc )) && ! _pm_hc_shell_ok "$PM_HC_SHELL"; then
+    _pm_err "PM_HC_SHELL=$(printf %q "$PM_HC_SHELL"): give an absolute path without \", \\, or control characters"
+    return 1
+  fi
   if podman container exists -- "$name" 2>/dev/null; then
     _pm_err "container $name exists; remove it with: pm rm $name"
     return 1
@@ -653,14 +687,12 @@ then: pm bash <container-name>"
   fi
 
   # herdr-core files are ready before pm creates anything in podman; the
-  # label lets pm stop, pm rm, and pm hc-add find containers made with --hc;
-  # SHELL reaches every core start in the container, whoever starts it, as
-  # podman sets none and the core starts new shells from its own
+  # label lets pm stop, pm rm, and pm hc-add find containers made with --hc
   if (( hc )); then
     _pm_hc_prepare "$abs" || return 1
     opts+=(-v "$_pm_hc_file:/etc/machine-id:ro"
       -v "$_pm_hc_state:/home/vscode/.local/state/herdr-core"
-      --label "pm-hc=$name" -e SHELL=/bin/bash)
+      --label "pm-hc=$name")
   fi
 
   # one --secret per requested token; podman exposes each as an env var
@@ -707,13 +739,16 @@ then: pm bash <container-name>"
   trap - INT
 
   # the agent files as pm cp-claude and pm cp-copilot copy them, then the
-  # hc machine on this host, whose connection starts the core; a failed
-  # copy still lets the later steps run, and the container stays on any
-  # failure
+  # core's shell in herdr-core's config and the hc machine on this host,
+  # whose connection starts the core; a failed step still lets the later
+  # ones run, and the container stays on any failure
   local rc=0
   if (( cc )); then _pm_put_claude "$name" || rc=1; fi
   if (( cp )); then _pm_put_copilot "$name" || rc=1; fi
-  if (( hc )); then _pm_hc_add "$name" 'pm run' || rc=1; fi
+  if (( hc )); then
+    _pm_hc_config "$name" || rc=1
+    _pm_hc_add "$name" 'pm run' || rc=1
+  fi
   return $rc
 }
 
@@ -2067,7 +2102,7 @@ pm_usage() {
     '' \
     'environment: PM_CC_SECRET, PM_CC_TARGET, PM_CP_SECRET, PM_CP_TARGET,' \
     '             PM_CLAUDE_MD, PM_CLAUDE_SETTINGS, PM_COPILOT_SETTINGS,' \
-    '             PM_COPILOT_CONFIG'
+    '             PM_COPILOT_CONFIG, PM_HC_SHELL'
 }
 
 pm_readme() {
@@ -2157,14 +2192,16 @@ GIT WORKTREES
 
 HERDR-CORE
 
-  pm run --hc gives the container a stable herdr-core identity, sets
-  SHELL=/bin/bash in it (podman sets no SHELL, and the core starts new
-  shells from its own), and adds the container to hc on this host as the
-  hc machine of the same name, connected through podman exec, so the Herdr
-  app reaches it. The name must then suit hc: 1-32 of a-z 0-9 - _ ., a
-  letter or digit first, not like t7. pm starts no core: the machine
-  connection starts it, also when hc connects again after pm start, and
-  without hc on this host the first hc command in the container does.
+  pm run --hc gives the container a stable herdr-core identity, writes
+  ~/.config/herdr-core/config.toml there with shell = ["$PM_HC_SHELL"]
+  when that file is missing, so the core starts its new shells with
+  PM_HC_SHELL (podman sets no SHELL, and only hc should get one), and adds
+  the container to hc on this host as the hc machine of the same name,
+  connected through podman exec, so the Herdr app reaches it. The name must
+  then suit hc: 1-32 of a-z 0-9 - _ ., a letter or digit first, not like t7.
+  pm starts no core: the machine connection starts it, also when hc
+  connects again after pm start, and without hc on this host the
+  first hc command in the container does.
   The identity lives on the host in an id file, mounted read-only at
   /etc/machine-id, and a state folder, mounted at
   /home/vscode/.local/state/herdr-core:
@@ -2235,6 +2272,7 @@ CONFIGURATION (environment variable and current value)
   PM_CLAUDE_SETTINGS   $PM_CLAUDE_SETTINGS
   PM_COPILOT_SETTINGS  $PM_COPILOT_SETTINGS
   PM_COPILOT_CONFIG    $PM_COPILOT_CONFIG
+  PM_HC_SHELL          $PM_HC_SHELL
 
 Every subcommand prints its details with --help, e.g. pm run --help.
 EOF

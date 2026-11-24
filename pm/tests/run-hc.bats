@@ -487,20 +487,72 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   if podman_find exec; then fail 'unexpected podman exec'; fi
 }
 
-@test "Q24: pm run --hc puts SHELL=/bin/bash in the container's environment and starts no hc serve" {
+# hc_config <container>: the fake container's herdr-core config.toml
+hc_config() { printf '%s\n' "$STUB_STATE/fs/$1/home/vscode/.config/herdr-core/config.toml"; }
+
+@test "O2: pm run --hc writes herdr-core's config.toml with the shell, sets no SHELL, and starts no hc serve" {
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
+  [ "$(<"$(hc_config pm-proj)")" = 'shell = ["/bin/bash"]' ]
+  has_line "$output" 'ok    pm-proj:/home/vscode/.config/herdr-core/config.toml: shell = ["/bin/bash"]'
   run_args
-  has_opt -e SHELL=/bin/bash
+  [[ " ${RUN[*]} " != *SHELL* ]] || fail "SHELL in: ${RUN[*]}"
   no_hc_serve
-  [[ $output$stderr != *'hc serve'* ]] || fail "output: $output$stderr"
-  # without --hc, pm sets no SHELL
+  # the config is written before the machine is added
+  [[ $output == *'config.toml: shell = '*'hc machine pm-proj added'* ]] || fail "output: $output"
+  # without --hc, no config
   forget_containers
   : >"$PODMAN_LOG"
   run --separate-stderr pm run --mount "$P" "$IMG" plain
   expect_status 0
-  run_args
-  if has_opt -e SHELL=/bin/bash 2>/dev/null; then fail 'SHELL=/bin/bash without --hc'; fi
+  [[ ! -e $(hc_config plain) ]]
+  if podman_find exec; then podman_show; fail 'unexpected podman exec'; fi
+}
+
+@test "O2: an existing config.toml stays as it is, with a skip line" {
+  local f
+  f=$(hc_config pm-proj)
+  mkdir -p "${f%/*}"
+  printf 'shell = ["/bin/fish"]\n' >"$f"
+  run --separate-stderr pm run --hc --mount "$P" "$IMG"
+  expect_status 0
+  has_line "$output" 'skip  pm-proj:/home/vscode/.config/herdr-core/config.toml: exists; kept'
+  [ "$(<"$f")" = 'shell = ["/bin/fish"]' ]
+  hc_find machine add || { hc_show; fail 'no hc machine add'; }
+}
+
+@test "O2: PM_HC_SHELL picks the shell, also one with a space or other letters" {
+  local sh
+  for sh in /bin/zsh '/opt/my tools/bäsh'; do
+    forget_containers
+    PM_HC_SHELL=$sh run --separate-stderr pm run --hc --mount "$P" "$IMG"
+    expect_status 0
+    [ "$(<"$(hc_config pm-proj)")" = "shell = [\"$sh\"]" ] || fail "config: $(<"$(hc_config pm-proj)")"
+  done
+}
+
+@test "O2: a PM_HC_SHELL that is not an absolute path TOML can hold as is fails before anything is created" {
+  local sh
+  for sh in bash '/bin/b"sh' '/bin/b\sh' $'/bin/b\tsh' $'/bin/b\nsh'; do
+    PM_HC_SHELL=$sh run --separate-stderr pm run --hc --mount "$P" "$IMG"
+    expect_status 1
+    has_line "$stderr" "error PM_HC_SHELL=$(printf %q "$sh"): give an absolute path without \", \\, or control characters"
+    no_create
+    [ -z "$(ls -A "$P")" ] || fail "pm wrote: $(ls -A "$P")"
+    [[ ! -e $HOME/.config/herdr-core ]]
+  done
+  # without --hc it does not matter
+  PM_HC_SHELL=bash run --separate-stderr pm run --mount "$P" "$IMG"
+  expect_status 0
+}
+
+@test "O2: a failed config write is an error; the machine is still added, exit 1, the container stays" {
+  STUB_HCCONF_RC=1 run --separate-stderr pm run --hc --mount "$P" "$IMG"
+  expect_status 1
+  has_line "$stderr" 'error pm-proj:/home/vscode/.config/herdr-core/config.toml: Error: stub: write failed'
+  hc_find machine add || { hc_show; fail 'no hc machine add'; }
+  if podman_find rm; then podman_show; fail 'pm removed the container'; fi
+  [[ -e $STUB_STATE/containers/pm-proj ]]
 }
 
 # ------------------------------------------------------------------ S12
@@ -577,13 +629,14 @@ esac'
   section=${section%%$'\n'runs:*}
   for s in '<dir>/.devcontainer/herdr-machine-id' '<dir>/herdr-machine-id' \
     '.config/herdr-core/container/<foldername>-<devcontainerId>' sha256 \
-    /etc/machine-id "$STATE_TARGET" SHELL=/bin/bash 'first hc command' \
+    /etc/machine-id "$STATE_TARGET" config.toml 'shell = ["/bin/bash"]' PM_HC_SHELL 'first hc command' \
     'hc machine' 'pm-hc=<container-name>' 'pm start' rollback 'pm rm'; do
     [[ $section == *"$s"* ]] || fail "the herdr-core section lacks: $s"
   done
-  # Q24: the runs block sets SHELL with --hc and starts no hc serve
-  [[ $output == *'[--label pm-hc=<container-name> -e SHELL=/bin/bash]'* ]] || fail 'runs: lacks SHELL'
-  [[ $output != *'hc serve'* ]] || fail "the help still starts hc serve: $output"
+  # O2: the runs block writes the config, sets no SHELL, starts no hc serve
+  [[ $output == *'with --hc: shell = ["/bin/bash"] into ~/.config/herdr-core/config.toml'* ]] \
+    || fail 'runs: lacks the config'
+  [[ $output != *'-e SHELL'* && $output != *'hc serve'* ]] || fail "help: $output"
   [[ $output == *'hc machine add --name <container-name>'* ]] || fail 'runs: lacks hc machine add'
   # D23: one container per folder, with its limits
   has_line "$output" 'one container per folder:'
@@ -608,7 +661,7 @@ esac'
   section=${section%%$'\n'[A-Z]*}
   for s in --hc /etc/machine-id .devcontainer/herdr-machine-id \
     .config/herdr-core/container/ 'one at a time' 'VS Code' git \
-    SHELL=/bin/bash 'first hc command' \
+    config.toml PM_HC_SHELL 'first hc command' \
     'only one core runs per state folder' .devcontainer/devcontainer.json \
     '.devcontainer/<name>/devcontainer.json' 'hc exec --on' 'pm-hc=' \
     'pm start' 'pm rm'; do

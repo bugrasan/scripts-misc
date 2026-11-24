@@ -194,6 +194,8 @@ forget_containers() {
   for d in containers status mounts labels pmscript create secrets cores nohc nosha; do
     rm -f -- "$STUB_STATE/$d"/*
   done
+  # their files go with them
+  rm -rf -- "${STUB_STATE:?}"/fs/* "${STUB_STATE:?}"/cbin/*
 }
 
 # hc_find [-x] <arg>...: podman_find on the calls of the fake hc

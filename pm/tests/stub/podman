@@ -25,6 +25,8 @@
 #                       container created, as podman does (default 0)
 #   STUB_START_RC       exit status of `start` (default 0)
 #   STUB_STOP_RC        exit status of `stop` (default 0)
+#   STUB_HCCONF_RC      exit status of the herdr-core config.toml write of
+#                       pm run --hc, which then writes nothing
 #   STUB_HCSTOP_RC      exit status of `exec ... hc server stop`; it then
 #                       prints STUB_HCSTOP_OUT to stderr
 #   STUB_HCSTOP_OUT     without STUB_HCSTOP_RC: what it prints instead of
@@ -221,6 +223,18 @@ case ${1-} in
       if [[ ${args[i]} == -- ]]; then ctr=${args[i+1]}; break; fi
     done
     case $* in
+      *' /home/vscode/.config/herdr-core/config.toml')
+        # pm run --hc: pm's own script writes the config into the fake
+        # files of the container, from stdin
+        if [[ -n ${STUB_HCCONF_RC-} ]]; then
+          echo 'Error: stub: write failed' >&2
+          exit "$STUB_HCCONF_RC"
+        fi
+        for (( i = 0; i < ${#args[@]}; i++ )); do
+          [[ ${args[i]} != -c ]] || script=${args[i+1]}
+        done
+        "${STUB_SH:?}" -c "$script" sh "$s/fs/$ctr$last"
+        exit ;;
       *' hc server stop --json')
         # pm stop: hc stops the core when one runs, as hc does
         if [[ -n ${STUB_HCSTOP_RC-} ]]; then
@@ -275,6 +289,8 @@ case ${1-} in
     exit 0 ;;
   rm)
     for d in containers status mounts labels pmscript create cores nohc nosha; do rm -f -- "$s/$d/$last"; done
+    # its files go with it
+    rm -rf -- "${s:?}/fs/$last" "${s:?}/cbin/$last"
     printf '%s\n' "$last"
     exit 0 ;;
   ps)
