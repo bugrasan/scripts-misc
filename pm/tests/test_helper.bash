@@ -50,7 +50,7 @@ use_min_path() {
   local t p
   mkdir -p "$MIN_BIN"
   for t in bash env cat mkdir chmod mv rm ln ls cp tr sed grep head tail cut \
-    sort wc dirname basename touch stat id uname sleep od readlink ps; do
+    sort wc dirname basename touch stat id uname sleep od readlink ps rmdir; do
     if p=$(type -P "$t"); then ln -sf -- "$p" "$MIN_BIN/$t"; fi
   done
   PM_PATH=$FAKE_BIN:$STUB_BIN:$MIN_BIN

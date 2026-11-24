@@ -304,9 +304,15 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   expect_status 0
   has_line "$stderr" "pm run: note: no hc on PATH, so $CTR is not added as an hc machine; add it later with: pm hc-add $CTR"
   use_host_hc
+  # hc on PATH, but no host core yet: pm ps shows stopped and starts none
+  run --separate-stderr pm ps
+  expect_status 0
+  [ "$(ps_cell HOST-HERDR "$(real_row "$CTR")")" = stopped ] || fail "output: $output"
+  [ ! -e "$HC_SOCKET" ] || fail 'pm ps started a host core'
   run --separate-stderr pm hc-add "$CTR"
   expect_status 0
   has_line "$output" "ok    hc machine $CTR added"
+  [ -S "$HC_SOCKET" ] || fail 'no host core socket after pm hc-add'
   [ "$(host_machine "$CTR")" = "$(command -v podman) exec -i $CTR sh -c True" ] \
     || fail "machine: $(hc machine ls --json)"
 
@@ -448,4 +454,21 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   r=$(real_row "$CTR2") || fail "no row for $CTR2 in: $output"
   [ "$(ps_cell SECRET-CC "$r")" = no ]
   [ "$(ps_cell SECRET-CP "$r")" = yes ]
+}
+
+@test "pm ps: CONT-HERDR stopped without a core, unavailable where hc is not on PATH" {
+  local r
+  # containers not made by pm, so no hc serve runs; with PATH=/usr/bin:/bin
+  # the exec of pm ps finds no hc, which the image has in /usr/local/bin
+  podman run -d --init --userns=keep-id --name "$CTR" "$IMG" sleep infinity >/dev/null
+  podman run -d --init --userns=keep-id -e PATH=/usr/bin:/bin --name "$CTR2" "$IMG" \
+    sleep infinity >/dev/null
+  run --separate-stderr pm ps
+  expect_status 0
+  r=$(real_row "$CTR") || fail "no row for $CTR in: $output"
+  [ "$(ps_cell CONT-HERDR "$r")" = stopped ] || fail "row: $r"
+  # no hc on this host's PATH in this test: HOST-HERDR is unavailable
+  [ "$(ps_cell HOST-HERDR "$r")" = unavailable ] || fail "row: $r"
+  r=$(real_row "$CTR2") || fail "no row for $CTR2 in: $output"
+  [ "$(ps_cell CONT-HERDR "$r")" = unavailable ] || fail "row: $r"
 }

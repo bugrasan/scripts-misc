@@ -278,3 +278,30 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
     else [ "$(ps_cell CONFIG-CC "$r")" = n/a,n/a ] || fail "c$i: $r"; fi
   done
 }
+
+@test "ps: an exec that gets no file descriptor leaves its cells unavailable and n/a" {
+  local i r want got failed=0
+  for i in 1 2 3 4 5 6 7 8; do
+    fake_container "c$i"
+    (( i % 2 == 0 )) || : >"$STUB_STATE/cores/c$i"
+    mkdir -p "$STUB_STATE/fs/c$i/home/vscode/.claude"
+    cp -- "$PM_CLAUDE_MD" "$STUB_STATE/fs/c$i/home/vscode/.claude/CLAUDE.md"
+  done
+  # fds 10 to 13 only: bash holds two of them while it opens one, so of each
+  # round of 5 execs only the first ones get a descriptor
+  run --separate-stderr "$BASH" -c 'ulimit -n 14 && exec "$@"' _ \
+    env PATH="$PM_PATH" "$BASH" "$PM_SH" ps --agents
+  expect_status 0
+  [ -z "$stderr" ] || fail "stderr: $stderr"
+  for i in 1 2 3 4 5 6 7 8; do
+    r=$(ps_row "c$i") want=stopped got=$(ps_cell CONT-HERDR "$r")
+    (( i % 2 == 0 )) || want=running
+    if [ "$got" = unavailable ]; then
+      (( ++failed ))
+      [ "$(ps_cell CONFIG-CC "$r")" = n/a,n/a ] || fail "c$i: $r"
+    else
+      [ "$got" = "$want" ] && [ "$(ps_cell CONFIG-CC "$r")" = identical,n/a ] || fail "c$i: $r"
+    fi
+  done
+  (( failed > 0 && failed < 8 )) || fail "unavailable rows: $failed of 8: $output"
+}

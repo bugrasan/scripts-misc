@@ -1213,6 +1213,7 @@ _pm_ps_herdr() {
   fi
   # in the container: an hc serve process in /proc, else hc there or not;
   # $s keeps the script's own command line from matching
+  # shellcheck disable=SC2016  # the script runs in the container's sh
   _pm_ps_execs outs 's=serve
     for p in /proc/[0-9]*; do
       c=$(tr "\000" " " <"$p/cmdline" 2>/dev/null) || continue
@@ -1269,6 +1270,7 @@ _pm_ps_agents() {
   hmd=$(_pm_file_sha256 "$PM_CLAUDE_MD")
   hcs=$(_pm_file_sha256 "$PM_CLAUDE_SETTINGS")
   hps=$(_pm_file_sha256 "$PM_COPILOT_SETTINGS")
+  # shellcheck disable=SC2016  # the script runs in the container's sh
   _pm_ps_execs outs 'command -v sha256sum >/dev/null || exit 3
     for f; do
       if [ -f "$f" ]; then sha256sum <"$f" 2>/dev/null || echo -; else echo -; fi

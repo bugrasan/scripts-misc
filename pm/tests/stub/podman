@@ -48,10 +48,14 @@ status() { if [[ -e $s/status/$1 ]]; then cat -- "$s/status/$1"; else printf '%s
 # val <dir> <name>: the content of a state file, or nothing
 val() { [[ ! -e $s/$1/$2 ]] || cat -- "$s/$1/$2"; }
 # track <1|-1>: count the execs of pm ps that run at once, under a lock
-# made by mkdir (portable, unlike flock), and keep the peak in execs.max
+# made by mkdir (portable, unlike flock), and keep the peak in execs.max;
+# a lock that stays taken for about 10 seconds fails the call, not the run
 track() {
-  local n m
-  until mkdir -- "$s/execs.lock" 2>/dev/null; do sleep 0.01; done
+  local n m t=0
+  until mkdir -- "$s/execs.lock" 2>/dev/null; do
+    (( ++t <= 1000 )) || { echo 'stub: execs.lock stays taken' >&2; exit 97; }
+    sleep 0.01
+  done
   n=$(( $(cat -- "$s/execs.run" 2>/dev/null || echo 0) + $1 ))
   m=$(cat -- "$s/execs.max" 2>/dev/null || echo 0)
   printf '%s\n' "$n" >"$s/execs.run"
