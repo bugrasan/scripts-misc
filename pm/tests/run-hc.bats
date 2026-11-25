@@ -419,6 +419,21 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   [ "$(ls -A "$HC")" = "$state" ]
 }
 
+@test "S8: an image without hc: the container exits at once; pm reports the error, exits 1, and keeps it for pm rm" {
+  # podman run succeeds, as the init and sh exist, but hc serve ends at once
+  export STUB_RUN_EXIT=127
+  run --separate-stderr pm run --hc --mount "$P" "$IMG"
+  expect_status 1
+  has_line "$stderr" 'error pm-proj:/home/vscode/.config/herdr-core/config.toml: Error: can only create exec sessions on running containers: container state improper'
+  if podman_find rm || podman_find network rm; then podman_show; fail 'pm rolled back'; fi
+  [[ -e $STUB_STATE/containers/pm-proj && -e $STUB_STATE/networks/proj ]]
+  [ "$(<"$STUB_STATE/status/pm-proj")" = exited ]
+  run --separate-stderr pm rm pm-proj
+  expect_status 0
+  podman_find -x rm -- pm-proj
+  podman_find -x network rm -- proj
+}
+
 # ------------------------------------------------------------------ S9
 
 @test "S9: sha256sum comes first" {

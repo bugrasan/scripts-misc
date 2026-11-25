@@ -6,7 +6,8 @@
 # ghcr.io/bugrasan/devcontainer-base-ai/base:latest); needs python3
 # the tests write only below BATS_TEST_TMPDIR and to
 # $HOME/.config/herdr-core/container/<unique-name>-*, and remove their
-# containers, networks, and state folders also when they fail; pm itself
+# containers, networks, state folders, and the image without hc that one
+# test commits, also when they fail; pm itself
 # also creates $HOME/.config/herdr-core/container in the real HOME when it
 # is missing and sets $HOME/.config/herdr-core to mode 700, as it does for
 # every pm run --hc; the tests leave both in place
@@ -43,6 +44,7 @@ setup() {
   HC=$HOME/.config/herdr-core/container
   HOST_HC=0
   SECRETS=()
+  NOHC_IMG=''
   mkdir -p -- "$DIR"
 }
 
@@ -56,6 +58,8 @@ teardown() {
   podman rm -f -t 0 -- "$CTR" >/dev/null 2>&1 || true
   podman rm -f -t 0 -- "$CTR2" >/dev/null 2>&1 || true
   podman rm -f -t 0 -- "$CTR2-2" >/dev/null 2>&1 || true
+  # the image without hc, once no container uses it
+  [[ -z ${NOHC_IMG-} ]] || podman rmi -f -- "$NOHC_IMG" >/dev/null 2>&1 || true
   podman network rm -- "$NET" >/dev/null 2>&1 || true
   local d
   for d in "$HC/$NAME"-*; do
@@ -278,7 +282,6 @@ core_shell() {
   suffix=${states[0]##*/"$NAME"-}
   [[ $suffix =~ ^[0123456789abcdefghijklmnopqrstuv]{52}$ ]] || fail "suffix $suffix"
   if [[ -n $NODE ]]; then [ "$suffix" = "$(ref_id "$DIR")" ]; fi
-  podman exec "$CTR" hc ls >/dev/null
   core_running "$CTR"
   ids=$(core_ids "${states[0]}")
   read -r mid _ <<<"$ids"
@@ -519,7 +522,6 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
 @test "pm doctor does not count the core of a keep-id container as the host's" {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
-  podman exec "$CTR" hc ls >/dev/null
   core_running "$CTR"
   # the container's core runs as this user, in another pid namespace
   run --separate-stderr pm doctor
@@ -582,4 +584,26 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   [ "$output" = "$CTR" ] || fail "output: $output"
   core_running "$CTR"
   [ "$(running_core_id "$CTR")" = "$core_id" ]
+}
+
+@test "pm run --hc with an image without hc: the container exits with 127, pm exits 1 and keeps it for pm rm" {
+  # the image without hc and herdr-core; teardown removes what remains
+  NOHC_IMG=localhost/$NAME:nohc
+  podman run --name "$CTR2" --user 0 "$IMG" rm -f /usr/local/bin/hc /usr/local/bin/herdr-core
+  podman commit -q "$CTR2" "$NOHC_IMG" >/dev/null
+  podman rm -- "$CTR2" >/dev/null
+  # podman run succeeds, but hc serve is not found, so the container stops
+  run --separate-stderr pm run --hc --mount "$DIR" "$NOHC_IMG"
+  expect_status 1
+  [[ $stderr == *"error $CTR:/home/vscode/.config/herdr-core/config.toml: "*'can only create exec sessions on running containers'* ]] \
+    || fail "stderr: $stderr"
+  [ "$(podman container inspect --format '{{.State.Status}} {{.State.ExitCode}}' -- "$CTR")" = 'exited 127' ]
+  podman network exists -- "$NET"
+  run --separate-stderr pm rm --force "$CTR"
+  expect_status 0
+  run podman container exists -- "$CTR"
+  [ "$status" -ne 0 ]
+  run podman network exists -- "$NET"
+  [ "$status" -ne 0 ]
+  podman rmi -- "$NOHC_IMG" >/dev/null
 }

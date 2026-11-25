@@ -24,6 +24,9 @@
 #   STUB_SECRETS        names of the podman secrets that exist
 #   STUB_RUN_RC         exit status of `run`; a failed run leaves the
 #                       container created, as podman does (default 0)
+#   STUB_RUN_EXIT       when set, `run` succeeds, but the main command ends
+#                       at once, as hc serve where the image lacks hc: the
+#                       container is exited, with no core
 #   STUB_START_RC       exit status of `start` (default 0)
 #   STUB_STOP_RC        exit status of `stop` (default 0)
 #   STUB_HCCONF_RC      exit status of the herdr-core config.toml write of
@@ -193,8 +196,13 @@ case ${1-} in
       echo 'Error: stub: podman run failed' >&2
       exit "$STUB_RUN_RC"
     fi
-    # hc serve as the main command: the core runs with the container
-    [[ -z $name ]] || ! hcmain "$name" || : >"$s/cores/$name"
+    # hc serve as the main command: the core runs with the container;
+    # with STUB_RUN_EXIT, the main command and the container end at once
+    if [[ -n ${STUB_RUN_EXIT-} ]]; then
+      [[ -z $name ]] || printf 'exited\n' >"$s/status/$name"
+    else
+      [[ -z $name ]] || ! hcmain "$name" || : >"$s/cores/$name"
+    fi
     echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     exit 0 ;;
   start)
@@ -229,6 +237,11 @@ case ${1-} in
     for (( i = 1; i < ${#args[@]}; i++ )); do
       if [[ ${args[i]} == -- ]]; then ctr=${args[i+1]}; break; fi
     done
+    # as podman 6.2: no exec into a container that does not run
+    if [[ $(status "$ctr") != running ]]; then
+      echo 'Error: can only create exec sessions on running containers: container state improper' >&2
+      exit 255
+    fi
     case $* in
       *' /home/vscode/.config/herdr-core/config.toml')
         # pm run --hc: pm's own script writes the config into the fake

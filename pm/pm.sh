@@ -488,7 +488,9 @@ herdr-core:
   stops, the container stops: hc server stop, hc server restart, hc update,
   hc machine update from this host, or a crash; there is no restart policy,
   so pm start brings the container and its core back; with an image
-  without hc, podman run fails and pm rolls back
+  without hc, or a core that exits at once, the container stops right
+  after it starts: pm reports the error and exits 1, and the container
+  stays until pm rm removes it
   an id file and a state folder on the host keep the core's identity;
   with a <dir>/.devcontainer folder, at the dev container template's paths:
     id file       <dir>/.devcontainer/herdr-machine-id
@@ -504,8 +506,9 @@ herdr-core:
   core reads it for each new shell, also while it runs, and the
   container's environment gets no SHELL, so other tools keep theirs
   after podman run, pm adds the container to hc on this host as the hc machine
-  <container-name>, connected through podman exec -i <container-name> sh -c;
-  it keeps a machine of that name with exactly this connection, stops with
+  <container-name>, connected through podman exec -i <container-name> sh -c,
+  a bare podman, so podman must be on the PATH of the hc core on this host;
+  pm keeps a machine of that name with exactly this connection, stops with
   an error for any other, and only notes when hc is not on PATH; the hc
   machine ls it runs first starts the core on this host when none runs
   the label pm-hc=<container-name> marks the container: pm rm removes its
@@ -670,7 +673,8 @@ then: pm bash <container-name>"
       --label "pm-hc=$name")
     # the core as the main command: exec makes hc serve the init's direct
     # child, which gets podman stop's SIGTERM; its output stays out of
-    # podman logs (Q27); an image without hc fails podman run below
+    # podman logs (Q27); without hc in the image, podman run succeeds, but
+    # the container stops at once, and the config write below fails
     main=(sh -c 'exec hc serve >/dev/null 2>&1')
   fi
 
@@ -2144,13 +2148,16 @@ HERDR-CORE
   container to hc on this host as the hc machine of the same name,
   connected through podman exec -i <container> sh -c, so the Herdr app
   reaches it. The name must then suit hc: 1-32 of a-z 0-9 - _ ., a letter
-  or digit first, not like t7.
+  or digit first, not like t7. The hc core on this host runs that bare
+  podman, so podman must be on the core's PATH.
   The init passes the SIGTERM of pm stop on to hc serve, so the core saves
   its state and stops, and pm start brings it back; hc's output stays out
   of podman logs. Whenever the core stops, the container stops: hc server
   stop, hc server restart, hc update, hc machine update from this host, or
-  a crash. There is no restart policy, so start it again with pm start. An
-  image without hc makes podman run fail, and pm removes what it created.
+  a crash. There is no restart policy, so start it again with pm start.
+  With an image without hc, or a core that exits at once, the container
+  stops right after it starts: pm reports the error and exits 1, and the
+  container stays until pm rm removes it.
   The identity lives on the host in an id file, mounted read-only at
   /etc/machine-id, and a state folder, mounted at
   /home/vscode/.local/state/herdr-core:
@@ -2183,9 +2190,11 @@ HERDR-CORE
   To start over, delete the id file and the state folder. The dev container
   and a pm container of one project share the identity and the state, so
   run only one at a time: only one core runs per state folder, and hc in
-  every container that mounts it uses that core. The devcontainerId depends
-  on the folder path, so it matches only when VS Code opened the same path
-  as --mount, and only for .devcontainer/devcontainer.json; a config in
+  any other container that mounts it uses that core, but a pm --hc
+  container started while another core runs there stops at once, as its
+  hc serve exits. The devcontainerId depends on the folder path, so it
+  matches only when VS Code opened the same path as --mount, and only for
+  .devcontainer/devcontainer.json; a config in
   .devcontainer/<name>/devcontainer.json gets another devcontainerId, so
   that dev container shares the id file but not the state folder. Keep the
   id file out of git; pm notes when git does not ignore it.
