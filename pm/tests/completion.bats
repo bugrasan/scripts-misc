@@ -1,19 +1,102 @@
 #!/usr/bin/env bats
-# stub tests for the completion of pm run --hc (H5 of the v8 spec): the
-# _pm_candidates functions of `pm sh` (bash) and `pm zsh` (zsh), called
-# with prepared words; the fake podman answers the image list
+# stub tests for the completion of pm run --hc (H5 of the v8 spec) and of
+# pm rm --force (V9-05): the _pm_candidates functions of `pm sh` (bash) and
+# `pm zsh` (zsh), called with prepared words; the fake podman answers the
+# image and container lists
 # run: bats pm/tests/completion.bats
 
 load test_helper
 
 setup() {
   stub_setup
-  export STUB_IMAGES=example.org/img:1
+  export STUB_IMAGES=example.org/img:1 STUB_PS=pm-x
 }
 
-# lines of pm run that both shells must complete alike
+# lines that both shells must complete alike
 CASES=("pm run -" "pm run --hc -" "pm.sh run --mount x --hc img --"
-  "pm run --cc --hc --net n1 --h" "pm run --hc ''" "pm run --hc --mount x ''")
+  "pm run --cc --hc --net n1 --h" "pm run --hc ''" "pm run --hc --mount x ''"
+  "pm rm -" "pm rm ''" "pm rm pm-x -" "pm.sh rm --force ''" "pm rm -f ''"
+  "pm ''" "pm hc-add ''" "pm hc-rm -" "pm doctor ''" "pm ps -" "pm ps -a -" "pm ps --agents -")
+
+# candidates: the candidates in $output (after the kind line), sorted, on
+# one line
+candidates() { sed 1d <<<"$output" | LC_ALL=C sort | tr '\n' ' '; }
+
+# rm_completion <bash_candidates|zsh_candidates>: the pm rm checks of V9-05
+rm_completion() {
+  run --separate-stderr "$1" pm rm -
+  expect_status 0
+  [ "$(candidates)" = '--force --help ' ] || fail "pm rm -: $(candidates)"
+  run --separate-stderr "$1" pm rm pm-x -
+  expect_status 0
+  [ "$(candidates)" = '--force ' ] || fail "pm rm pm-x -: $(candidates)"
+  run --separate-stderr "$1" pm rm --force ''
+  expect_status 0
+  [ "$(candidates)" = 'pm-x ' ] || fail "pm rm --force: $(candidates)"
+  run --separate-stderr "$1" pm rm ''
+  expect_status 0
+  [ "$(candidates)" = 'pm-x ' ] || fail "pm rm: $(candidates)"
+  # -f is no option of pm rm, so no container follows it
+  run --separate-stderr "$1" pm rm -f ''
+  expect_status 0
+  if grep -qxF pm-x <<<"$output"; then fail 'containers offered after -f'; fi
+}
+
+# v9_completion <bash_candidates|zsh_candidates>: hc-add, hc-rm, doctor,
+# and pm ps --agents
+v9_completion() {
+  fake_container up pm-up
+  fake_container down pm-down
+  printf 'exited\n' >"$STUB_STATE/status/down"
+  fake_container plain
+  run --separate-stderr "$1" pm ''
+  expect_status 0
+  has_line "$output" hc-add
+  has_line "$output" hc-rm
+  has_line "$output" doctor
+  # hc-add: running containers with the pm-hc label; hc-rm: all with it
+  run --separate-stderr "$1" pm hc-add ''
+  expect_status 0
+  [ "$(candidates)" = 'up ' ] || fail "pm hc-add: $(candidates)"
+  run --separate-stderr "$1" pm hc-rm ''
+  expect_status 0
+  [ "$(candidates)" = 'down up ' ] || fail "pm hc-rm: $(candidates)"
+  # doctor takes no arguments, only --help
+  run --separate-stderr "$1" pm doctor ''
+  expect_status 0
+  has_line "$output" kind=none
+  run --separate-stderr "$1" pm doctor -
+  expect_status 0
+  [ "$(candidates)" = '--help ' ] || fail "pm doctor -: $(candidates)"
+  # ps: --agents, and the other flags after one of them
+  run --separate-stderr "$1" pm ps -
+  expect_status 0
+  [ "$(candidates)" = '--agents --all --help -a ' ] || fail "pm ps -: $(candidates)"
+  run --separate-stderr "$1" pm ps -a -
+  expect_status 0
+  [ "$(candidates)" = '--agents ' ] || fail "pm ps -a -: $(candidates)"
+  run --separate-stderr "$1" pm ps --agents -
+  expect_status 0
+  [ "$(candidates)" = '--all -a ' ] || fail "pm ps --agents -: $(candidates)"
+}
+
+@test "v9 bash: hc-add, hc-rm, doctor, and pm ps --agents complete" {
+  v9_completion bash_candidates
+}
+
+@test "v9 zsh: hc-add, hc-rm, doctor, and pm ps --agents complete" {
+  need_zsh
+  v9_completion zsh_candidates
+}
+
+@test "V9-05 bash: pm rm completes --force but not -f, and containers after --force" {
+  rm_completion bash_candidates
+}
+
+@test "V9-05 zsh: pm rm completes --force but not -f, and containers after --force" {
+  need_zsh
+  rm_completion zsh_candidates
+}
 
 @test "H5 bash: pm run offers --hc among the flags" {
   run --separate-stderr bash_candidates pm run -
@@ -72,7 +155,7 @@ CASES=("pm run -" "pm run --hc -" "pm.sh run --mount x --hc img --"
   has_line "$output" example.org/img:1
 }
 
-@test "H5: bash and zsh return the same candidates for pm run lines" {
+@test "H5, V9-05: bash and zsh return the same candidates for pm run and pm rm lines" {
   need_zsh
   local c a b
   local -a w

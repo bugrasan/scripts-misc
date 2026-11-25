@@ -22,15 +22,22 @@ stub_setup() {
   T=$BATS_TEST_TMPDIR
   export HOME=$T/home NO_COLOR=1 GIT_CONFIG_NOSYSTEM=1 GIT_CEILING_DIRECTORIES=$T
   unset XDG_CONFIG_HOME CDPATH
-  export PODMAN_LOG=$T/podman.log STUB_STATE=$T/podman-state
+  export PODMAN_LOG=$T/podman.log STUB_STATE=$T/podman-state HC_LOG=$T/hc.log
   export STUB_HASH_LOG=$T/hash.log STUB_PYTHON=$PYTHON
   STUB_BIN=$T/stub-bin FAKE_BIN=$T/fake-bin MIN_BIN=$T/min-bin
   HC=$HOME/.config/herdr-core/container
   P=$T/proj
-  mkdir -p "$HOME" "$STUB_BIN" "$FAKE_BIN" "$STUB_STATE/containers" "$STUB_STATE/networks" "$P"
+  mkdir -p "$HOME" "$STUB_BIN" "$FAKE_BIN" "$P"
+  mkdir -p "$STUB_STATE"/{containers,networks,status,mounts,labels,pmscript,create,secrets,cores,nohc,nosha,fs,cbin}
+  # what the fake podman needs to run pm's in-container scripts
+  STUB_SH=$(command -v sh) STUB_BASH=$BASH STUB_HASH_TOOL=$PM_TESTS_DIR/stub/hash-tool
+  export STUB_SH STUB_BASH STUB_HASH_TOOL
   : >"$PODMAN_LOG"
+  : >"$HC_LOG"
+  # the fake podman, and a fake host hc so that no real one is ever reached
   cp -- "$PM_TESTS_DIR/stub/podman" "$STUB_BIN/podman"
-  chmod 755 "$STUB_BIN/podman"
+  cp -- "$PM_TESTS_DIR/stub/hc" "$STUB_BIN/hc"
+  chmod 755 "$STUB_BIN/podman" "$STUB_BIN/hc"
   export PATH=$STUB_BIN:$PATH
   PM_PATH=$FAKE_BIN:$PATH
   # never reach a real podman
@@ -43,7 +50,7 @@ use_min_path() {
   local t p
   mkdir -p "$MIN_BIN"
   for t in bash env cat mkdir chmod mv rm ln ls cp tr sed grep head tail cut \
-    sort wc dirname basename touch stat id uname sleep od; do
+    sort wc dirname basename touch stat id uname sleep od readlink ps rmdir; do
     if p=$(type -P "$t"); then ln -sf -- "$p" "$MIN_BIN/$t"; fi
   done
   PM_PATH=$FAKE_BIN:$STUB_BIN:$MIN_BIN
@@ -54,6 +61,19 @@ fake() {
   printf '#!%s\n%s\n' "$BASH" "$2" >"$FAKE_BIN/$1"
   chmod 755 "$FAKE_BIN/$1"
 }
+
+# fake_bash <version>: the bash on PM_PATH reports this version; any other
+# call runs the real bash, so #!/usr/bin/env bash scripts keep working
+fake_bash() {
+  fake bash "if [[ \${1-} == --version ]]; then
+  echo 'GNU bash, version $1(1)-release (x86_64-pc-linux-gnu)'
+  exit 0
+fi
+exec $(printf %q "$BASH") \"\$@\""
+}
+
+# fake_tool <name> <line>: a fake tool that prints <line> for --version
+fake_tool() { fake "$1" "printf '%s\n' $(printf %q "$2")"; }
 
 # fake_hash <tool>: fake sha256sum, shasum, or openssl that logs its call
 # to $STUB_HASH_LOG and prints the real digest in that tool's format
@@ -74,10 +94,11 @@ need_git()    { command -v git >/dev/null || skip 'git not found'; }
 pm() { env PATH="${PM_PATH:-$PATH}" "$BASH" "$PM_SH" "$@"; }
 
 # pm_internal <function> [<arg>...]: call one of pm.sh's own functions;
-# pm.sh is evaluated without its final `main "$@"` line
+# pm.sh is evaluated without its final `main "$@"` line; grep reads it as
+# bytes, as in a test locale such as GBK it drops lines with an n-dash
 pm_internal() {
   env PATH="${PM_PATH:-$PATH}" "$BASH" -c \
-    'src=$(grep -vxF -- "$2" "$1") && eval "$src" && shift 2 && "$@"' \
+    'src=$(LC_ALL=C grep -a -vxF -- "$2" "$1") && eval "$src" && shift 2 && "$@"' \
     _ "$PM_SH" 'main "$@"' "$@"
 }
 
@@ -147,9 +168,94 @@ count_v() {
   echo "$n"
 }
 
-# hc_serve_call <container>: find the exact call that starts the core
-hc_serve_call() {
-  podman_find -x exec -d -e SHELL=/bin/bash -- "$1" hc serve
+# no_hc_serve: fail when pm ran hc serve through podman exec; the core of
+# a pm run --hc container is its main command, HC_MAIN (owner decision 1)
+no_hc_serve() {
+  local i
+  podman_load
+  for (( i = 0; i < ${#CALLS[@]}; i++ )); do
+    podman_call "$i"
+    [[ ${CALL[0]} != exec || " ${CALL[*]} " != *'hc serve'* ]] && continue
+    podman_show >&2
+    fail 'pm ran hc serve through podman exec'
+  done
+}
+
+# the main command of a pm run --hc container after sh -c; without --hc it
+# is sleep infinity
+HC_MAIN='exec hc serve >/dev/null 2>&1'
+
+# main_is <image> <arg>...: the last podman run ends with <image> and the
+# main command <arg>..., argument by argument
+main_is() {
+  local -a want=("$@")
+  local k n=$#
+  run_args
+  for (( k = 1; k <= n; k++ )); do
+    (( ${#RUN[@]} > k )) && [[ ${RUN[${#RUN[@]}-k]} == "${want[n-k]}" ]] && continue
+    printf 'podman run does not end with: %s\n' "$*" >&2
+    podman_show >&2
+    return 1
+  done
+}
+
+# fake_container <name> [<pm-hc label> [<mount source>...]]: a fake
+# container as podman run leaves it, without a podman call in the log
+fake_container() {
+  printf '\n' >"$STUB_STATE/containers/$1"
+  [[ -z ${2-} ]] || printf '%s\n' "$2" >"$STUB_STATE/labels/$1"
+  (( $# <= 2 )) || printf '%s\n' "${@:3}" >"$STUB_STATE/mounts/$1"
+}
+
+# forget_containers: drop all fake containers, so that the next pm run on
+# the same folder is no second container
+forget_containers() {
+  local d
+  for d in containers status mounts labels pmscript create secrets cores nohc nosha; do
+    rm -f -- "$STUB_STATE/$d"/*
+  done
+  # their files go with them
+  rm -rf -- "${STUB_STATE:?}"/fs/* "${STUB_STATE:?}"/cbin/*
+}
+
+# hc_find [-x] <arg>...: podman_find on the calls of the fake hc
+hc_find() { PODMAN_LOG=$HC_LOG podman_find "$@"; }
+hc_show() { PODMAN_LOG=$HC_LOG podman_show | sed 's/^podman /hc /'; }
+
+# pm_via <container>: the connection command pm gives hc for a container,
+# with a bare podman (owner decision 4)
+pm_via() { printf 'podman exec -i %s sh -c\n' "$1"; }
+
+# hc_machine <name> <target> [<via: true|false>]: one machine as hc machine
+# ls --json lists it (keys sorted, compact)
+hc_machine() {
+  printf '{"host":"h","id":"0123","name":%s,"session":null,"state":"connected","target":%s,"temporary":false,"version":"0.1.21","via":%s}' \
+    "$(json_str "$1")" "$(json_str "$2")" "${3:-true}"
+}
+
+# json_str <text>: <text> as a JSON string (quotes and backslashes only)
+json_str() { local s=${1//\\/\\\\}; printf '"%s"' "${s//\"/\\\"}"; }
+
+# ps_row <id>: the line of pm ps output ($output) for a fake container,
+# whose ID is its name
+ps_row() { grep -m1 -E "^$1 " <<<"$output"; }
+
+# ps_cell <column> <row>: the cell of <row> below <column> of the header
+# (the first line of $output), trailing blanks removed; the cells line up
+# with the header words, and the next column starts the next cell
+ps_cell() {
+  local head=${output%%$'\n'*} c pos start=-1 next=-1
+  [[ $head == *"$1"* ]] || return 1
+  pos=${head%%"$1"*}
+  start=${#pos}
+  for c in 'CONTAINER ID' NAME STATUS PM NETWORK CONT-HERDR HOST-HERDR SECRET-CC \
+    CONFIG-CC SECRET-CP CONFIG-CP PROJECT; do
+    [[ $head == *"$c"* ]] || continue
+    pos=${head%%"$c"*}
+    if (( ${#pos} > start && ( next < 0 || ${#pos} < next ) )); then next=${#pos}; fi
+  done
+  if (( next < 0 )); then c=${2:start}; else c=${2:start:next-start}; fi
+  printf '%s\n' "${c%"${c##*[![:space:]]}"}"
 }
 
 # no_create: pm created no network and no container
