@@ -11,14 +11,14 @@
 #   pmscript/<name>    the value of its pm-script label
 #   create/<name>      its podman run arguments, each ended by a NUL
 #   secrets/<name>     its mount secrets, one name per line
-#   cores/<name>       present while a core runs in it (tests make it, as
-#                      pm starts none; podman stop ends it)
+#   cores/<name>       present while a core runs in it: run and start make
+#                      it when the main command is hc serve (pm run --hc),
+#                      tests make it for others; podman stop ends it
 #   nohc/<name>        present when it has no hc
 #   nosha/<name>       present when it has no sha256sum
 #   fs/<name>/...      its files, from podman cp
 #   cbin/<name>        the PATH of its sha256 script
-# and networks/<name> per fake network, and kill.log: each kill in pm's
-# core stop script, as "<container> <arguments>"
+# and networks/<name> per fake network
 # settings, all optional:
 #   STUB_PODMAN_VERSION version that --version reports (default 6.2.0)
 #   STUB_SECRETS        names of the podman secrets that exist
@@ -28,12 +28,6 @@
 #   STUB_STOP_RC        exit status of `stop` (default 0)
 #   STUB_HCCONF_RC      exit status of the herdr-core config.toml write of
 #                       pm run --hc, which then writes nothing
-#   STUB_HCSTOP_RC      exit status of `exec ... hc server stop`; it then
-#                       prints STUB_HCSTOP_OUT to stderr
-#   STUB_HCSTOP_OUT     without STUB_HCSTOP_RC: what it prints instead of
-#                       {"stopped":true} or {"stopped":false}
-#   STUB_KILL_RC        exit status of kill in pm's core stop script, which
-#                       then prints an error and ends nothing
 #   STUB_CP_RC          exit status of `cp` (default 0)
 #   STUB_NET_CREATE_RC  exit status of `network create` (default 0)
 #   STUB_STATUS         state of containers without a status file
@@ -70,6 +64,13 @@ track() {
   printf '%s\n' "$n" >"$s/execs.run"
   (( n <= m )) || printf '%s\n' "$n" >"$s/execs.max"
   rmdir -- "$s/execs.lock"
+}
+# hcmain <name>: true when its main command, the last create argument,
+# runs hc serve, as with pm run --hc
+hcmain() {
+  local -a a=()
+  [[ ! -e $s/create/$1 ]] || mapfile -t -d '' a <"$s/create/$1"
+  (( ${#a[@]} )) && [[ ${a[${#a[@]}-1]} == *'hc serve'* ]]
 }
 # jlabel <name>: its pm-hc label as podman's json prints it
 jlabel() { printf '"%s"' "$(val labels "$1")"; }
@@ -192,6 +193,8 @@ case ${1-} in
       echo 'Error: stub: podman run failed' >&2
       exit "$STUB_RUN_RC"
     fi
+    # hc serve as the main command: the core runs with the container
+    [[ -z $name ]] || ! hcmain "$name" || : >"$s/cores/$name"
     echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     exit 0 ;;
   start)
@@ -201,10 +204,11 @@ case ${1-} in
     fi
     [[ ${STUB_START_RC:-0} == 0 ]] || { echo 'Error: stub: podman start failed' >&2; exit "$STUB_START_RC"; }
     printf 'running\n' >"$s/status/$last"
+    ! hcmain "$last" || : >"$s/cores/$last"
     printf '%s\n' "$last"
     exit 0 ;;
   stop)
-    # the container ends, and with it a core that podman exec started
+    # the container ends, and with it its core
     if [[ ! -e $c/$last ]]; then
       printf 'Error: no container with name or ID "%s" found: no such container\n' "$last" >&2
       exit 125
@@ -237,41 +241,6 @@ case ${1-} in
           [[ ${args[i]} != -c ]] || script=${args[i+1]}
         done
         "${STUB_SH:?}" -c "$script" sh "$s/fs/$ctr$last"
-        exit ;;
-      *'hc server stop --json'*)
-        # pm stop: pm's own script, with sh functions for hc, which stops
-        # the core when one runs, as hc does, and for kill, which logs its
-        # arguments; kill 1 ends the init, so the container stops and the
-        # exec dies with it (137), as podman's can
-        for (( i = 0; i < ${#args[@]}; i++ )); do
-          [[ ${args[i]} != -c ]] || script=${args[i+1]}
-        done
-        fakes=$(cat <<'EOF'
-hc() {
-  [ "$*" = 'server stop --json' ] || { echo "stub: hc $*" >&2; return 98; }
-  if [ -n "${STUB_HCSTOP_RC-}" ]; then
-    printf '%s\n' "${STUB_HCSTOP_OUT-}" >&2
-    return "$STUB_HCSTOP_RC"
-  fi
-  if [ -n "${STUB_HCSTOP_OUT-}" ]; then printf '%s\n' "$STUB_HCSTOP_OUT"
-  elif [ -e "$STUB_CORE" ]; then rm -f -- "$STUB_CORE"; echo '{"stopped":true}'
-  else echo '{"stopped":false}'; fi
-}
-kill() {
-  printf '%s %s\n' "$STUB_CTR" "$*" >>"$STUB_KILL_LOG"
-  if [ -n "${STUB_KILL_RC-}" ]; then
-    echo 'sh: kill: (1) - Operation not permitted' >&2
-    return "$STUB_KILL_RC"
-  fi
-  [ "$*" = 1 ] || return 0
-  echo exited >"$STUB_CSTATUS"
-  rm -f -- "$STUB_CORE"
-  exit 137
-}
-EOF
-)
-        STUB_CTR=$ctr STUB_CORE=$s/cores/$ctr STUB_CSTATUS=$s/status/$ctr \
-          STUB_KILL_LOG=$s/kill.log "${STUB_SH:?}" -c "$fakes"$'\n'"$script"
         exit ;;
       *'/proc/[0-9]*'*)
         # pm ps: the herdr state in the container

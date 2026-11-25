@@ -168,14 +168,34 @@ count_v() {
   echo "$n"
 }
 
-# no_hc_serve: fail when pm ran hc serve in any container; since Q24 the
-# core starts when needed, through the hc machine connection or the first
-# hc command in the container
+# no_hc_serve: fail when pm ran hc serve through podman exec; the core of
+# a pm run --hc container is its main command, HC_MAIN (owner decision 1)
 no_hc_serve() {
-  local i re='(^| )hc serve( |$)'
+  local i
   podman_load
   for (( i = 0; i < ${#CALLS[@]}; i++ )); do
-    [[ ! ${CALLS[i]} =~ $re ]] || { podman_show >&2; fail 'pm ran hc serve'; }
+    podman_call "$i"
+    [[ ${CALL[0]} != exec || " ${CALL[*]} " != *'hc serve'* ]] && continue
+    podman_show >&2
+    fail 'pm ran hc serve through podman exec'
+  done
+}
+
+# the main command of a pm run --hc container after sh -c; without --hc it
+# is sleep infinity
+HC_MAIN='exec hc serve >/dev/null 2>&1'
+
+# main_is <image> <arg>...: the last podman run ends with <image> and the
+# main command <arg>..., argument by argument
+main_is() {
+  local -a want=("$@")
+  local k n=$#
+  run_args
+  for (( k = 1; k <= n; k++ )); do
+    (( ${#RUN[@]} > k )) && [[ ${RUN[${#RUN[@]}-k]} == "${want[n-k]}" ]] && continue
+    printf 'podman run does not end with: %s\n' "$*" >&2
+    podman_show >&2
+    return 1
   done
 }
 
@@ -203,8 +223,8 @@ hc_find() { PODMAN_LOG=$HC_LOG podman_find "$@"; }
 hc_show() { PODMAN_LOG=$HC_LOG podman_show | sed 's/^podman /hc /'; }
 
 # pm_via <container>: the connection command pm gives hc for a container,
-# with the fake podman's path, which needs no quotes
-pm_via() { printf '%s exec -i %s sh -c\n' "$STUB_BIN/podman" "$1"; }
+# with a bare podman (owner decision 4)
+pm_via() { printf 'podman exec -i %s sh -c\n' "$1"; }
 
 # hc_machine <name> <target> [<via: true|false>]: one machine as hc machine
 # ls --json lists it (keys sorted, compact)

@@ -147,15 +147,16 @@ fs() { printf '%s\n' "$STUB_STATE/fs/pm-proj$1"; }
   [[ $output == *PM_COPILOT_CONFIG* ]] || fail "help: $output"
 }
 
-@test "C3: PM_COPILOT_CONFIG and PM_HC_SHELL are listed with the other PM_* variables" {
+@test "C3: PM_COPILOT_CONFIG is listed with the other PM_* variables, and PM_HC_SHELL is gone" {
   export PM_COPILOT_CONFIG=$T/copilot-config.json PM_HC_SHELL=/bin/zsh
   run pm help
   expect_status 0
-  [[ $output == *'environment: '*PM_COPILOT_SETTINGS*PM_COPILOT_CONFIG*PM_HC_SHELL* ]] || fail "pm help: $output"
+  [[ $output == *'environment: '*PM_COPILOT_SETTINGS*PM_COPILOT_CONFIG* ]] || fail "pm help: $output"
+  [[ $output != *PM_HC_SHELL* ]] || fail "pm help: $output"
   run pm readme
   expect_status 0
   has_line "$output" "  PM_COPILOT_CONFIG    $PM_COPILOT_CONFIG"
-  has_line "$output" '  PM_HC_SHELL          /bin/zsh'
+  [[ $output != *PM_HC_SHELL* ]] || fail "pm readme: $output"
   run pm run --help
   expect_status 0
   [[ $output == *'with --cp: as pm cp-copilot, instructions, settings, and config.json'* ]] \

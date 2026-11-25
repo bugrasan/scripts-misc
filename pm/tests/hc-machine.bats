@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 # stub tests for the hc machine of a pm run --hc container (pm v9, owner
-# decisions D15 to D21, M10, Q24): a fake podman and a fake hc (stub/hc) log
-# every call, and HOME is a per-test folder; no real podman or hc runs
+# decisions D15 to D21, Q24, and the exact connection of owner decision
+# 4): a fake podman and a fake hc (stub/hc) log every call, and HOME is a
+# per-test folder; no real podman or hc runs
 # run: bats pm/tests/hc-machine.bats
 # shellcheck disable=SC2016,SC2030,SC2031
 # SC2016: literal backticks and $ on purpose; SC2030, SC2031: each bats
@@ -18,7 +19,7 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
 
 # ------------------------------------------------------------------ D15
 
-@test "D15: pm adds the container as an hc machine, without stdin and --install, and starts no hc serve" {
+@test "D15: pm adds the container as an hc machine, without stdin and --install, and runs no hc serve by exec" {
   run --separate-stderr pm run --hc --mount "$P" "$IMG" <<<'y'
   expect_status 0
   no_hc_serve
@@ -28,18 +29,15 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   has_line "$output" 'ok    hc machine pm-proj added'
 }
 
-@test "D15: a podman path with a space or quote is quoted for sh in the via command" {
-  local odd="$T/odd dir'q" via
+@test "decision 4: the via command has a bare podman, wherever podman is" {
+  local odd="$T/odd dir'q"
   mkdir -p "$odd"
   cp -- "$STUB_BIN/podman" "$odd/podman"
   PM_PATH=$odd:$PM_PATH
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
-  hc_find machine add --name pm-proj --via || { hc_show; fail 'no hc machine add'; }
-  via=${CALL[5]}
-  [[ $via == *' exec -i pm-proj sh -c' ]] || fail "via: $via"
-  # sh must read the path back as one word
-  [ "$(sh -c "set -- ${via% exec -i pm-proj sh -c}; printf '%s' \"\$1\"")" = "$odd/podman" ]
+  hc_find -x machine add --name pm-proj --via 'podman exec -i pm-proj sh -c' \
+    || { hc_show; fail 'no hc machine add with a bare podman'; }
 }
 
 # ------------------------------------------------------------------ D16
@@ -129,88 +127,41 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   hc_find -x machine add --name pm-proj --via "$(pm_via pm-proj)" || { hc_show; fail 'no hc machine add'; }
 }
 
-# ------------------------------------------------------------------ M10
+# ------------------------------------------------------------------ exact match
 
-# stale <name> <podman path>: pm's machine for container <name> through
-# another podman path, as podman at an older place left it
-stale() { hc_machine "$1" "$2 exec -i $1 sh -c"; }
-
-@test "M10: pm's machine through another podman path is stale: pm run --hc replaces it, with a note" {
-  local old s
-  for old in /usr/local/bin/podman "'/Applications/Podman Desktop/podman'" '/opt/my tools/podman' \
-    "'/it'\\''s \"new\"/podman'"; do
-    forget_containers
-    : >"$HC_LOG"
-    FAKE_HC_LS=$(machines "$(stale pm-proj "$old")") run --separate-stderr pm run --hc --mount "$P" "$IMG"
-    expect_status 0
-    has_line "$stderr" 'pm run: note: hc machine pm-proj connects to this container through another podman path; replacing it'
-    hc_find -x machine rm -- pm-proj || { hc_show; fail "no hc machine rm for $old"; }
-    s=$FOUND
-    hc_find -x machine add --name pm-proj --via "$(pm_via pm-proj)" || { hc_show; fail 'no hc machine add'; }
-    (( FOUND > s )) || { hc_show; fail 'hc machine add before hc machine rm'; }
-    has_line "$output" 'ok    hc machine pm-proj added'
-  done
-}
-
-@test "M10: a failing hc machine rm of a stale machine is an error with hc's output, and pm adds nothing" {
-  FAKE_HC_LS=$(machines "$(stale pm-proj /usr/local/bin/podman)")
-  export FAKE_HC_LS FAKE_HC_RM_RC=1 FAKE_HC_RM_OUT='{"error":{"kind":"unavailable"}}'
-  run --separate-stderr pm run --hc --mount "$P" "$IMG"
-  expect_status 1
-  has_line "$stderr" 'error pm-proj: hc machine rm: {"error":{"kind":"unavailable"}}'
-  has_line "$stderr" 'pm run: add it later with: pm hc-add pm-proj'
-  if hc_find machine add; then hc_show; fail 'pm added the machine'; fi
-  [[ -e $STUB_STATE/containers/pm-proj ]]
-}
-
-@test "M10: look-alikes of pm's connection stay another connection" {
+@test "decision 4: only the exact connection is pm's; an absolute podman path and look-alikes are another" {
   local t
-  # no via, more after sh -c, nothing before exec, another container
-  for t in '/usr/local/bin/podman exec -i pm-proj sh -c|false' \
-    '/usr/local/bin/podman exec -i pm-proj sh -c -x|true' \
-    ' exec -i pm-proj sh -c|true' \
-    '/usr/local/bin/podman exec -i xpm-proj sh -c|true'; do
+  # target|via: absolute podman paths (pm's before decision 4), other
+  # commands, no via, more or less around pm's text, another container
+  for t in '/usr/local/bin/podman exec -i pm-proj sh -c|true' \
+    "'/Applications/Podman Desktop/podman' exec -i pm-proj sh -c|true" \
+    'sudo podman exec -i pm-proj sh -c|true' 'ssh box podman exec -i pm-proj sh -c|true' \
+    'docker exec -i pm-proj sh -c|true' 'podman exec -i pm-proj sh -c|false' \
+    'podman exec -i pm-proj sh -c -x|true' ' podman exec -i pm-proj sh -c|true' \
+    'xpodman exec -i pm-proj sh -c|true' 'podman exec -i xpm-proj sh -c|true'; do
     forget_containers
     : >"$HC_LOG"
     FAKE_HC_LS=$(machines "$(hc_machine pm-proj "${t%|*}" "${t##*|}")") \
       run --separate-stderr pm run --hc --mount "$P" "$IMG"
     expect_status 1
     has_line "$stderr" 'error pm-proj: hc already has a machine pm-proj with another connection; see hc machine ls'
-    if hc_find machine rm || hc_find machine add; then hc_show; fail "pm changed hc for: $t"; fi
-  done
-}
-
-@test "FR1-02: another command before exec -i is not pm's: pm run --hc and pm rm leave the machine alone" {
-  local p t
-  # only an absolute path to podman, as pm writes it, may come first
-  for p in docker 'ssh box podman' 'sudo podman' '/usr/bin/sudo /usr/bin/podman' \
-    /usr/bin/docker; do
-    t="$p exec -i pm-proj sh -c"
-    forget_containers
-    : >"$HC_LOG"
-    FAKE_HC_LS=$(machines "$(hc_machine pm-proj "$t")") \
-      run --separate-stderr pm run --hc --mount "$P" "$IMG"
-    expect_status 1
-    has_line "$stderr" 'error pm-proj: hc already has a machine pm-proj with another connection; see hc machine ls'
-    if hc_find machine rm || hc_find machine add; then hc_show; fail "pm changed hc for: $t"; fi
+    if hc_find machine rm || hc_find machine add; then hc_show; fail "pm run changed hc for: $t"; fi
     # pm rm keeps it, with a skip line
     : >"$HC_LOG"
-    FAKE_HC_LS=$(machines "$(hc_machine pm-proj "$t")") \
+    FAKE_HC_LS=$(machines "$(hc_machine pm-proj "${t%|*}" "${t##*|}")") \
       run --separate-stderr pm rm --force pm-proj
     expect_status 0
     has_line "$output" 'skip  hc machine pm-proj: another connection; kept'
     if hc_find machine rm; then hc_show; fail "pm rm removed: $t"; fi
   done
-}
-
-@test "M10: pm rm removes pm's machine through another podman path" {
-  fake_container pm-x pm-x
-  FAKE_HC_LS=$(machines "$(stale pm-x "'/old place/podman'")")
-  export FAKE_HC_LS
-  run --separate-stderr pm rm --force pm-x
+  # pm rm removes the exact one
+  fake_container pm-proj pm-proj
+  : >"$HC_LOG"
+  FAKE_HC_LS=$(machines "$(hc_machine pm-proj 'podman exec -i pm-proj sh -c')") \
+    run --separate-stderr pm rm --force pm-proj
   expect_status 0
-  hc_find -x machine rm -- pm-x || { hc_show; fail 'no hc machine rm'; }
-  has_line "$output" 'ok    hc machine pm-x removed'
+  hc_find -x machine rm -- pm-proj || { hc_show; fail 'no hc machine rm'; }
+  has_line "$output" 'ok    hc machine pm-proj removed'
 }
 
 # ------------------------------------------------------------------ D19, D20
@@ -317,7 +268,7 @@ stale() { hc_machine "$1" "$2 exec -i $1 sh -c"; }
   has_line "$output" '  rm         [--force] <container>  remove it, its pm network once unused, and its hc machine'
   run pm start --help
   expect_status 0
-  [[ $output == *'podman start <container>'* && $output == *'first hc command'* && $output != *'hc serve'* ]] \
+  [[ $output == *'podman start <container>'* && $output == *'hc serve'* ]] \
     || fail "pm start --help: $output"
   run pm rm --help
   expect_status 0

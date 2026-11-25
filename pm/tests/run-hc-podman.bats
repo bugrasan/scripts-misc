@@ -135,22 +135,14 @@ core_running() {
   fail "no core process in $1"
 }
 
-# no_core <container>: no core process runs there, a second after the call
-no_core() {
-  sleep 1
-  ! core_procs "$1" >/dev/null || { podman top "$1" args >&2; fail "a core runs in $1"; }
-}
-
-# term_reason <state> <name>: how the core recorded the end of terminal
-# <name>, from terminals.json below <state> (the session folder)
-term_reason() {
-  local f
-  f=$(find "$1" -name terminals.json 2>/dev/null | head -n 1)
-  [[ -n $f ]] || { find "$1" -ls >&2; return 1; }
-  python3 -I -c 'import json, sys
-for t in json.load(open(sys.argv[1]))["terminals"].values():
-    if t.get("name") == sys.argv[2]:
-        print(t.get("state"), t.get("reason"))' "$f" "$2"
+# init_child <container>: fail unless the init (pid 1, podman-init) has
+# exactly one child in podman top, and that child is hc serve
+init_child() {
+  local top
+  top=$(podman top "$1" pid ppid args)
+  [[ $(awk '$1 == 1 { print $3 }' <<<"$top") == /run/podman-init ]] || fail "no init as pid 1: $top"
+  [[ $(awk '$2 == 1 { print $3, $4, NF }' <<<"$top") == 'hc serve 4' ]] \
+    || fail "the init's children are not just hc serve: $top"
 }
 
 # bare_agent <container>: what a bare hc run --bg starts there, as hc names
@@ -211,10 +203,9 @@ core_shell() {
     exit 1'
 }
 
-@test "pm run --hc: mounts, the shell config; without host hc a core at the first hc command, bash by config; the identity survives pm rm --force" {
+@test "pm run --hc: mounts, the bash config, hc serve as the init's child with no output in podman logs; the identity survives pm rm --force" {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
-  [[ $output$stderr != *'hc serve'* ]] || fail "output: $output$stderr"
   local f=$DIR/herdr-machine-id id state mounts ids mid core_id core_id2
   id=$(<"$f")
   is_id "$id"
@@ -233,17 +224,19 @@ core_shell() {
   [[ -e $state/.pm-test-rw ]]
   rm -f -- "$state/.pm-test-rw"
 
-  # pm wrote the core's shell into herdr-core's config; the container's
-  # environment keeps no SHELL
-  has_line "$output" "ok    $CTR:/home/vscode/.config/herdr-core/config.toml: shell = [\"/bin/bash\"]"
-  [ "$(podman exec "$CTR" cat /home/vscode/.config/herdr-core/config.toml)" = 'shell = ["/bin/bash"]' ]
+  # pm wrote exactly the bash line into herdr-core's config; the
+  # container's environment keeps no SHELL
+  has_line "$output" "ok    $CTR:/home/vscode/.config/herdr-core/config.toml: shell = [ \"/bin/bash\" ]"
+  podman exec "$CTR" cat /home/vscode/.config/herdr-core/config.toml >"$BATS_TEST_TMPDIR/config.toml"
+  printf 'shell = [ "/bin/bash" ]\n' | cmp - "$BATS_TEST_TMPDIR/config.toml" \
+    || fail "config.toml: $(<"$BATS_TEST_TMPDIR/config.toml")"
   [ "$(podman exec "$CTR" sh -c 'echo "${SHELL-unset}"')" = unset ]
-  # without hc on this host, no core runs until the first hc command in the
-  # container; that core has no SHELL, and the config gives a bare hc run
-  # --bg bash all the same
-  no_core "$CTR"
-  podman exec "$CTR" hc ls >/dev/null
+  # the core is the main command: hc serve is the init's only child, exec
+  # left no sh between them, and hc writes nothing to podman logs; that core
+  # has no SHELL, and the config gives a bare hc run --bg bash all the same
   core_running "$CTR"
+  init_child "$CTR"
+  [ -z "$(podman logs "$CTR" 2>&1)" ] || fail "podman logs: $(podman logs "$CTR" 2>&1)"
   [ -z "$(core_shell "$CTR")" ] || fail "the core runs with SHELL=$(core_shell "$CTR")"
   [ "$(bare_agent "$CTR")" = bash ] || fail "a bare hc run --bg starts: $(bare_agent "$CTR")"
   ids=$(core_ids "$state")
@@ -262,7 +255,6 @@ core_shell() {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
   [[ $stderr != *'new herdr-core state folder'* ]] || fail "$stderr"
-  podman exec "$CTR" hc ls >/dev/null
   core_running "$CTR"
   core_started "$state" "$BATS_TEST_TMPDIR/second-run"
   ids=$(core_ids "$state")
@@ -311,32 +303,42 @@ core_shell() {
   podman container exists -- "$CTR2-2"
 }
 
-@test "pm run --hc adds a real hc machine, whose connection starts the core, bash by config; again after pm stop and pm start" {
+@test "pm run --hc adds a real hc machine with a bare podman; after pm stop and pm start the same core runs" {
   use_host_hc
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
   has_line "$output" "ok    hc machine $CTR added"
-  [[ $output$stderr != *'hc serve'* ]] || fail "output: $output$stderr"
-  [ "$(host_machine "$CTR")" = "$(command -v podman) exec -i $CTR sh -c True" ] \
+  [ "$(host_machine "$CTR")" = "podman exec -i $CTR sh -c True" ] \
     || fail "machine: $(hc machine ls --json)"
-  # the add's connection started the core, which has no SHELL; the config
-  # gives a bare hc run --bg bash
+  # the main command runs the core, which has no SHELL; the config gives a
+  # bare hc run --bg bash
   core_running "$CTR"
   [ "$(bare_agent "$CTR")" = bash ] || fail "a bare hc run --bg starts: $(bare_agent "$CTR")"
   # hc on the host reaches the container through the via connection
   run --separate-stderr hc exec --on "$CTR" uname -a
   expect_status 0
   [[ $output == Linux* ]] || fail "uname: $output"
+  local core_id
+  core_id=$(running_core_id "$CTR")
 
-  # pm start starts no core; hc on the host connects again and its
-  # connection starts one, whose bare hc run --bg is bash again
+  # pm stop and pm start are plain: the init passes SIGTERM on to hc serve,
+  # and the main command brings the same core back, with its state
   run --separate-stderr pm stop "$CTR"
   expect_status 0
+  [ "$output" = "$CTR" ] || fail "output: $output"
+  [ "$(podman container inspect --format '{{.State.ExitCode}}' -- "$CTR")" != 137 ] \
+    || fail 'hc serve needed SIGKILL'
   run --separate-stderr pm start "$CTR"
   expect_status 0
   [ "$output" = "$CTR" ] || fail "output: $output"
   core_running "$CTR"
-  [ "$(bare_agent "$CTR")" = bash ] || fail "a bare hc run --bg starts: $(bare_agent "$CTR")"
+  init_child "$CTR"
+  [ "$(running_core_id "$CTR")" = "$core_id" ]
+  # hc here dials the machine again with a backoff of its own
+  host_connected "$CTR"
+  run --separate-stderr hc exec --on "$CTR" uname -a
+  expect_status 0
+  [[ $output == Linux* ]] || fail "uname after pm start: $output"
 
   # pm rm --force removes the container and its machine
   run --separate-stderr pm rm --force "$CTR"
@@ -368,17 +370,18 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   has_line "$stderr" "pm run: note: no hc on PATH, so $CTR is not added as an hc machine; add it later with: pm hc-add $CTR"
   use_host_hc
   # hc on PATH, but no host core yet: pm ps shows stopped and starts none;
-  # nothing has started the container's core either
+  # the container's core runs already, as its main command
+  core_running "$CTR"
   run --separate-stderr pm ps
   expect_status 0
   [ "$(ps_cell HOST-HERDR "$(real_row "$CTR")")" = stopped ] || fail "output: $output"
-  [ "$(ps_cell CONT-HERDR "$(real_row "$CTR")")" = stopped ] || fail "output: $output"
+  [ "$(ps_cell CONT-HERDR "$(real_row "$CTR")")" = running ] || fail "output: $output"
   [ ! -e "$HC_SOCKET" ] || fail 'pm ps started a host core'
   run --separate-stderr pm hc-add "$CTR"
   expect_status 0
   has_line "$output" "ok    hc machine $CTR added"
   [ -S "$HC_SOCKET" ] || fail 'no host core socket after pm hc-add'
-  [ "$(host_machine "$CTR")" = "$(command -v podman) exec -i $CTR sh -c True" ] \
+  [ "$(host_machine "$CTR")" = "podman exec -i $CTR sh -c True" ] \
     || fail "machine: $(hc machine ls --json)"
 
   run --separate-stderr pm ps
@@ -391,21 +394,24 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   [ "$(ps_cell HOST-HERDR "$r")" = yes ]
   [ "$(ps_cell PROJECT "$r")" = "$DIR" ]
 
-  # a machine through another podman path, as after podman moved, is
-  # stale: pm ps shows no, and pm hc-add replaces it
-  mkdir -p -- "$BATS_TEST_TMPDIR/oldbin"
-  ln -s -- "$(command -v podman)" "$BATS_TEST_TMPDIR/oldbin/podman"
+  # a machine with an absolute podman path is another connection: pm ps
+  # shows no, and pm hc-add and pm hc-rm leave it alone
   hc machine rm -- "$CTR" >/dev/null
-  hc machine add --name "$CTR" --via "$BATS_TEST_TMPDIR/oldbin/podman exec -i $CTR sh -c" \
+  hc machine add --name "$CTR" --via "$(command -v podman) exec -i $CTR sh -c" \
     </dev/null >/dev/null
   run --separate-stderr pm ps
   expect_status 0
   [ "$(ps_cell HOST-HERDR "$(real_row "$CTR")")" = no ] || fail "output: $output"
   run --separate-stderr pm hc-add "$CTR"
-  expect_status 0
-  has_line "$stderr" "pm hc-add: note: hc machine $CTR connects to this container through another podman path; replacing it"
+  expect_status 1
+  has_line "$stderr" "error $CTR: hc already has a machine $CTR with another connection; see hc machine ls"
+  run --separate-stderr pm hc-rm "$CTR"
+  expect_status 1
   [ "$(host_machine "$CTR")" = "$(command -v podman) exec -i $CTR sh -c True" ] \
     || fail "machine: $(hc machine ls --json)"
+  hc machine rm -- "$CTR" >/dev/null
+  run --separate-stderr pm hc-add "$CTR"
+  expect_status 0
 
   # hc-rm drops the machine and keeps the container; a second hc-rm skips
   run --separate-stderr pm hc-rm "$CTR"
@@ -559,71 +565,21 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   [ "$(ps_cell CONT-HERDR "$r")" = unavailable ] || fail "row: $r"
 }
 
-@test "pm stop stops the core first, so it records how its terminals ended; the next hc command brings it back" {
+@test "pm run --hc: the container ends with its core, as after hc server stop; pm start brings the same core back" {
   run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
   expect_status 0
-  local core_id state
-  local -a states=("$HC/$NAME"-*)
-  state=${states[0]}
-  # hc server status is the first hc command here: it starts the core
+  local core_id i
   core_id=$(running_core_id "$CTR")
-  # a live terminal just before pm stop, within the 2 s in which the core
-  # saves a change; only a core that stops by itself ends it as server_stop
-  podman exec "$CTR" hc run --bg --name pm-stop sleep 600 >/dev/null
-  run --separate-stderr pm stop "$CTR"
-  expect_status 0
-  [ "${lines[0]}" = "ok    hc core in $CTR stopped" ] || fail "output: $output"
-  [ "${lines[1]}" = "$CTR" ] || fail "output: $output"
-  [ "$(term_reason "$state" pm-stop)" = 'finished server_stop' ] \
-    || fail "terminal: $(term_reason "$state" pm-stop)"
-
-  # pm start starts no core; the next hc command brings the same one back
+  podman exec "$CTR" hc server stop >/dev/null || true
+  for (( i = 0; i < 60; i++ )); do
+    [[ $(podman container inspect --format '{{.State.Status}}' -- "$CTR") != exited ]] || break
+    sleep 0.5
+  done
+  [ "$(podman container inspect --format '{{.State.Status}}' -- "$CTR")" = exited ] \
+    || fail 'the container runs on without its core'
   run --separate-stderr pm start "$CTR"
   expect_status 0
   [ "$output" = "$CTR" ] || fail "output: $output"
-  no_core "$CTR"
-  [ "$(running_core_id "$CTR")" = "$core_id" ]
-
-  # with no core running, pm stop says so, starts none, and stops anyway
-  podman exec "$CTR" hc server stop >/dev/null
-  touch -- "$BATS_TEST_TMPDIR/before-stop"
-  run --separate-stderr pm stop "$CTR"
-  expect_status 0
-  [ "$output" = $'skip  hc core in '"$CTR"$': none running\n'"$CTR" ] || fail "output: $output"
-  [ -z "$(find "$state" -name core.lock -newer "$BATS_TEST_TMPDIR/before-stop")" ] \
-    || fail 'hc server stop started a core'
-  [ "$(podman container inspect --format '{{.State.Status}}' -- "$CTR")" = exited ]
-}
-
-
-@test "PM_HC_SHELL picks the shell that a bare hc run --bg starts" {
-  local sh=/bin/sh
-  # zsh where the image has it, else sh: not bash either way
-  if podman run --rm -- "$IMG" test -x /bin/zsh >/dev/null 2>&1; then sh=/bin/zsh; fi
-  PM_HC_SHELL=$sh run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
-  expect_status 0
-  [ "$(podman exec "$CTR" cat /home/vscode/.config/herdr-core/config.toml)" = "shell = [\"$sh\"]" ]
-  [ "$(bare_agent "$CTR")" = "${sh##*/}" ] || fail "a bare hc run --bg starts: $(bare_agent "$CTR")"
-}
-
-@test "pm stop with hc here connected: the core stop ends the container at once, so no new core starts" {
-  use_host_hc
-  run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
-  expect_status 0
-  has_line "$output" "ok    hc machine $CTR added"
-  local state
-  local -a states=("$HC/$NAME"-*)
-  state=${states[0]}
-  # the add's connection started the core, and hc here holds the line
   core_running "$CTR"
-  host_connected "$CTR"
-  touch -- "$BATS_TEST_TMPDIR/before-stop"
-  run --separate-stderr pm stop "$CTR"
-  expect_status 0
-  [ "$output" = "ok    hc core in $CTR stopped"$'\n'"$CTR" ] || fail "output: $output"
-  # hc here dials again as soon as the core ends; its connection would
-  # start a core, which rewrites core.lock, had the container still run
-  [ -z "$(find "$state" -name core.lock -newer "$BATS_TEST_TMPDIR/before-stop")" ] \
-    || fail "a core started after the core stop: $(find "$state" -name core.lock -ls)"
-  [ "$(podman container inspect --format '{{.State.Status}}' -- "$CTR")" = exited ]
+  [ "$(running_core_id "$CTR")" = "$core_id" ]
 }

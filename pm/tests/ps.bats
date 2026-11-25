@@ -54,12 +54,10 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
 @test "ps: CONT-HERDR is running, stopped, or unavailable" {
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
-  # pm starts no core: stopped until the machine's connection or an hc
-  # command starts one
+  # the core is the main command of a pm run --hc container
   run --separate-stderr pm ps
   expect_status 0
-  [ "$(ps_cell CONT-HERDR "$(ps_row pm-proj)")" = stopped ]
-  : >"$STUB_STATE/cores/pm-proj"
+  [ "$(ps_cell CONT-HERDR "$(ps_row pm-proj)")" = running ]
   fake_container idle
   fake_container nohcc
   : >"$STUB_STATE/nohc/nohcc"
@@ -94,7 +92,7 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   [ "$(ps_cell HOST-HERDR "$(ps_row pm-proj)")" = unavailable ]
 }
 
-@test "M10: HOST-HERDR is yes only with podman's current path; pm's machine through another is no" {
+@test "decision 4: HOST-HERDR is yes only for the exact connection; an absolute podman path is no" {
   fake_container pm-a pm-a
   fake_container pm-b pm-b
   fake ps "printf '%s hc serve\n' $$"
@@ -107,7 +105,7 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   [ "$(ps_cell HOST-HERDR "$(ps_row pm-b)")" = no ]
   [ ! -s "$HC_LOG.stdin" ] && ! hc_find machine rm || { hc_show; fail 'pm ps changed hc'; }
   run pm ps --help
-  [[ $output == *'another podman path'*'pm hc-add'* ]] || fail "help: $output"
+  [[ $output == *'exactly the connection pm gives it'* && $output != *'podman path'* ]] || fail "help: $output"
 }
 
 @test "ps: without -a only running containers; -a adds the others" {

@@ -474,7 +474,24 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
   has_opt -v "$P:/workspaces/proj"
   has_opt -v "$P/herdr-machine-id:/etc/machine-id:ro"
   has_opt -v "$HC/proj-$(sha256_hex "$(<"$P/herdr-machine-id")"):$STATE_TARGET"
-  [ "${RUN[*]: -3}" = "$IMG sleep infinity" ]
+}
+
+@test "decision 1: with --hc, the main command is hc serve through sh -c exec, with --init; else sleep infinity" {
+  run --separate-stderr pm run --hc --mount "$P" "$IMG"
+  expect_status 0
+  main_is "$IMG" sh -c "$HC_MAIN"
+  [[ " ${RUN[*]} " == *' -d --init '* ]] || fail "no --init in: ${RUN[*]}"
+  [ "$HC_MAIN" = 'exec hc serve >/dev/null 2>&1' ]
+  no_hc_serve
+  forget_containers
+  run --separate-stderr pm run --mount "$P" "$IMG" plain
+  expect_status 0
+  main_is "$IMG" sleep infinity
+  [[ " ${RUN[*]} " == *' -d --init '* ]] || fail "no --init in: ${RUN[*]}"
+  forget_containers
+  run --separate-stderr pm run "$IMG" bare
+  expect_status 0
+  main_is "$IMG" sleep infinity
 }
 
 @test "S10: without --hc, pm run writes no herdr-core file and adds no mount" {
@@ -490,11 +507,15 @@ STATE_TARGET=/home/vscode/.local/state/herdr-core
 # hc_config <container>: the fake container's herdr-core config.toml
 hc_config() { printf '%s\n' "$STUB_STATE/fs/$1/home/vscode/.config/herdr-core/config.toml"; }
 
-@test "O2: pm run --hc writes herdr-core's config.toml with the shell, sets no SHELL, and starts no hc serve" {
+@test "decision 3: pm run --hc writes config.toml with exactly the bash line when missing, sets no SHELL" {
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
-  [ "$(<"$(hc_config pm-proj)")" = 'shell = ["/bin/bash"]' ]
-  has_line "$output" 'ok    pm-proj:/home/vscode/.config/herdr-core/config.toml: shell = ["/bin/bash"]'
+  printf 'shell = [ "/bin/bash" ]\n' | cmp - "$(hc_config pm-proj)" || fail "config: $(<"$(hc_config pm-proj)")"
+  has_line "$output" 'ok    pm-proj:/home/vscode/.config/herdr-core/config.toml: shell = [ "/bin/bash" ]'
+  # one exec as the container user (no --user) wrote it from stdin, and
+  # made the missing folder
+  podman_find exec -i -- pm-proj sh -c || { podman_show; fail 'no config write'; }
+  [[ " ${CALL[*]} " != *' --user'* && " ${CALL[*]} " != *' -u '* ]] || fail "exec: ${CALL[*]}"
   run_args
   [[ " ${RUN[*]} " != *SHELL* ]] || fail "SHELL in: ${RUN[*]}"
   no_hc_serve
@@ -509,41 +530,35 @@ hc_config() { printf '%s\n' "$STUB_STATE/fs/$1/home/vscode/.config/herdr-core/co
   if podman_find exec; then podman_show; fail 'unexpected podman exec'; fi
 }
 
-@test "O2: an existing config.toml stays as it is, with a skip line" {
+@test "decision 3: an existing config.toml stays untouched, with a skip line" {
   local f
   f=$(hc_config pm-proj)
   mkdir -p "${f%/*}"
-  printf 'shell = ["/bin/fish"]\n' >"$f"
+  printf 'shell = ["/bin/fish"]\n# mine\n' >"$f"
+  cp -- "$f" "$T/config.before"
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
   has_line "$output" 'skip  pm-proj:/home/vscode/.config/herdr-core/config.toml: exists; kept'
-  [ "$(<"$f")" = 'shell = ["/bin/fish"]' ]
+  cmp -- "$T/config.before" "$f"
   hc_find machine add || { hc_show; fail 'no hc machine add'; }
 }
 
-@test "O2: PM_HC_SHELL picks the shell, also one with a space or other letters" {
-  local sh
-  for sh in /bin/zsh '/opt/my tools/bäsh'; do
+@test "decision 3: no PM_HC_SHELL: pm ignores the variable, and no help or readme names it" {
+  local sh args
+  for sh in /bin/zsh bash '/bin/b"sh'; do
     forget_containers
     PM_HC_SHELL=$sh run --separate-stderr pm run --hc --mount "$P" "$IMG"
     expect_status 0
-    [ "$(<"$(hc_config pm-proj)")" = "shell = [\"$sh\"]" ] || fail "config: $(<"$(hc_config pm-proj)")"
+    printf 'shell = [ "/bin/bash" ]\n' | cmp - "$(hc_config pm-proj)" || fail "config: $(<"$(hc_config pm-proj)")"
+    [[ $output$stderr != *PM_HC_SHELL* ]] || fail "output: $output$stderr"
   done
-}
-
-@test "O2: a PM_HC_SHELL that is not an absolute path TOML can hold as is fails before anything is created" {
-  local sh
-  for sh in bash '/bin/b"sh' '/bin/b\sh' $'/bin/b\tsh' $'/bin/b\nsh'; do
-    PM_HC_SHELL=$sh run --separate-stderr pm run --hc --mount "$P" "$IMG"
-    expect_status 1
-    has_line "$stderr" "error PM_HC_SHELL=$(printf %q "$sh"): give an absolute path without \", \\, or control characters"
-    no_create
-    [ -z "$(ls -A "$P")" ] || fail "pm wrote: $(ls -A "$P")"
-    [[ ! -e $HOME/.config/herdr-core ]]
+  for args in help readme 'run --help'; do
+    # shellcheck disable=SC2086  # split the argument string on purpose
+    PM_HC_SHELL=/bin/zsh run pm $args
+    expect_status 0
+    [[ $output != *PM_HC_SHELL* && $output != */bin/zsh* ]] || fail "pm $args: $output"
   done
-  # without --hc it does not matter
-  PM_HC_SHELL=bash run --separate-stderr pm run --mount "$P" "$IMG"
-  expect_status 0
+  ! grep -q PM_HC_SHELL -- "$PM_SH" || fail "pm.sh still names PM_HC_SHELL"
 }
 
 @test "O2: a failed config write is an error; the machine is still added, exit 1, the container stays" {
@@ -629,15 +644,21 @@ esac'
   section=${section%%$'\n'runs:*}
   for s in '<dir>/.devcontainer/herdr-machine-id' '<dir>/herdr-machine-id' \
     '.config/herdr-core/container/<foldername>-<devcontainerId>' sha256 \
-    /etc/machine-id "$STATE_TARGET" config.toml 'shell = ["/bin/bash"]' PM_HC_SHELL 'first hc command' \
+    /etc/machine-id "$STATE_TARGET" config.toml 'shell = [ "/bin/bash" ]' 'hc serve' SIGTERM \
+    'podman logs' 'hc server stop' 'hc server restart' 'hc update' 'hc machine update' \
+    'restart policy' 'podman exec -i <container-name> sh -c' 'exactly' \
     'hc machine' 'pm-hc=<container-name>' 'pm start' rollback 'pm rm'; do
     [[ $section == *"$s"* ]] || fail "the herdr-core section lacks: $s"
   done
-  # O2: the runs block writes the config, sets no SHELL, starts no hc serve
-  [[ $output == *'with --hc: shell = ["/bin/bash"] into ~/.config/herdr-core/config.toml'* ]] \
+  # decisions 1, 3, 4: the runs block has the main command, the config, no
+  # SHELL, and the machine with a bare podman
+  [[ $output == *"sh -c 'exec hc serve >/dev/null 2>&1'"* ]] || fail 'runs: lacks the main command'
+  [[ $output == *'with --hc: shell = [ "/bin/bash" ] into ~/.config/herdr-core/config.toml'* ]] \
     || fail 'runs: lacks the config'
-  [[ $output != *'-e SHELL'* && $output != *'hc serve'* ]] || fail "help: $output"
+  [[ $output != *'-e SHELL'* && $output != *PM_HC_SHELL* && $output != *'podman path'* ]] \
+    || fail "help: $output"
   [[ $output == *'hc machine add --name <container-name>'* ]] || fail 'runs: lacks hc machine add'
+  [[ $output == *"--via 'podman exec -i <container-name> sh -c'"* ]] || fail 'runs: lacks the bare podman'
   # D23: one container per folder, with its limits
   has_line "$output" 'one container per folder:'
   section=${output#*$'\n'one container per folder:$'\n'}
@@ -661,7 +682,9 @@ esac'
   section=${section%%$'\n'[A-Z]*}
   for s in --hc /etc/machine-id .devcontainer/herdr-machine-id \
     .config/herdr-core/container/ 'one at a time' 'VS Code' git \
-    config.toml PM_HC_SHELL 'first hc command' \
+    config.toml 'shell = [ "/bin/bash" ]' 'hc serve' SIGTERM 'podman logs' \
+    'hc machine update' 'restart policy' 'podman exec -i <container> sh -c' \
+    'absolute podman path' \
     'only one core runs per state folder' .devcontainer/devcontainer.json \
     '.devcontainer/<name>/devcontainer.json' 'hc exec --on' 'pm-hc=' \
     'pm start' 'pm rm'; do
