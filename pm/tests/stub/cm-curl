@@ -1,0 +1,25 @@
+#!/bin/sh
+# fake curl in a fake container for the chezmoi one-shot of pm run --cm and
+# pm cm (pm/tests/stub/podman puts it on the script's PATH): it prints a
+# fake installer, which writes its arguments and its working directory to
+# $HOME/installer-args and $HOME/installer-pwd, prints
+# STUB_CM_INSTALL_LINES numbered lines, and exits STUB_CM_INSTALL_RC;
+# STUB_CM_CURL=fail makes curl fail as with an unreachable host
+if [ "${STUB_CM_CURL-}" = fail ]; then
+  echo "curl: (6) Could not resolve host: $2" >&2
+  exit 6
+fi
+if [ "$1" != -fsLS ] || [ "$2" != get.chezmoi.io/lb ]; then
+  echo "curl: stub: unexpected arguments: $*" >&2
+  exit 22
+fi
+# builtins only: the script's PATH has nothing but sh and this curl
+printf '%s\n' \
+  'printf "%s\n" "$@" >"$HOME/installer-args"' \
+  'pwd >"$HOME/installer-pwd"' \
+  'i=0' \
+  'while [ "$i" -lt "${STUB_CM_INSTALL_LINES:-0}" ]; do' \
+  '  i=$((i + 1))' \
+  '  echo "line $i"' \
+  'done' \
+  'exit "${STUB_CM_INSTALL_RC:-0}"'

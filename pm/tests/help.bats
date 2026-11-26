@@ -31,6 +31,20 @@ setup() {
     || fail "the --mount lines lack the worktrees target: $output"
 }
 
+@test "CMF1-05: every option description in pm run --help starts in the same column" {
+  run --separate-stderr pm run --help
+  expect_status 0
+  local l cols=''
+  for l in "${lines[@]}"; do
+    # an option line: two spaces, the option (with its argument), spaces
+    [[ $l =~ ^(\ \ (--[a-z]+(\ <[a-z-]+>)?|<[a-z-]+>)\ +)[^\ ] ]] || continue
+    cols+=" ${#BASH_REMATCH[1]}"
+  done
+  [[ -n $cols ]] || fail 'no option lines'
+  # shellcheck disable=SC2086  # one word per column
+  [ "$(printf '%s\n' $cols | sort -u | wc -l)" -eq 1 ] || fail "columns:$cols" "$output"
+}
+
 @test "R1: pm run --help ends with a pointer to pm readme" {
   run --separate-stderr pm run --help
   expect_status 0

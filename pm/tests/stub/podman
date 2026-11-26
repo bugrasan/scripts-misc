@@ -36,8 +36,12 @@
 #   STUB_STOP_RC        exit status of `stop` (default 0)
 #   STUB_HCCONF_RC      exit status of the herdr-core config.toml write of
 #                       pm run --hc, which then writes nothing
-#   STUB_CM_RC          exit status of the chezmoi one-shot of pm run --cm
-#                       and pm cm, which then records nothing in chezmoi/
+#   STUB_CM_CURL        the fake curl (stub/cm-curl) of the chezmoi
+#                       one-shot: fail: it fails as with an unreachable
+#                       host; missing: there is no curl
+#   STUB_CM_INSTALL_RC, STUB_CM_INSTALL_LINES
+#                       exit status and number of output lines of the fake
+#                       chezmoi installer that the fake curl prints
 #   STUB_CP_RC          exit status of `cp` (default 0)
 #   STUB_NET_CREATE_RC  exit status of `network create` (default 0)
 #   STUB_STATUS         state of containers without a status file
@@ -262,17 +266,25 @@ case ${1-} in
     # shellcheck disable=SC2016  # pm's literal script, matched as text
     case $* in
       *get.chezmoi.io/lb*)
-        # pm run --cm, pm cm: the chezmoi one-shot; records the repo (the
-        # last argument) in chezmoi/<name>; STUB_CM_RC makes it fail as an
-        # unreachable installer does
-        if [[ -n ${STUB_CM_RC-} ]]; then
-          echo 'curl: (6) Could not resolve host: get.chezmoi.io' >&2
-          exit "$STUB_CM_RC"
-        fi
-        echo 'info installed /home/vscode/.local/bin/chezmoi' >&2
-        mkdir -p -- "$s/chezmoi"
-        printf '%s\n' "${args[${#args[@]}-1]}" >"$s/chezmoi/$ctr"
-        exit 0 ;;
+        # pm run --cm, pm cm: pm's own script runs from /, with the
+        # container's home below fs/<name> as HOME and a PATH of sh and the
+        # fake curl (stub/cm-curl) only; the arguments after the script
+        # are its $0 and the repo
+        for (( i = 0; i < ${#args[@]}; i++ )); do
+          [[ ${args[i]} != -c ]] || { script=${args[i+1]}; j=$((i + 2)); break; }
+        done
+        home=/home/vscode
+        [[ ! -e $s/home/$ctr ]] || home=$(<"$s/home/$ctr")
+        home=$s/fs/$ctr$home cmbin=$s/cmbin/$ctr
+        mkdir -p -- "$home" "$cmbin"
+        rm -f -- "$cmbin/sh" "$cmbin/curl"
+        ln -s -- "${STUB_SH:?}" "$cmbin/sh"
+        [[ ${STUB_CM_CURL-} == missing ]] || ln -s -- "${STUB_CM_CURL_BIN:?}" "$cmbin/curl"
+        cd / || exit 1
+        env -i HOME="$home" PATH="$cmbin" STUB_CM_CURL="${STUB_CM_CURL-}" \
+          STUB_CM_INSTALL_RC="${STUB_CM_INSTALL_RC-}" STUB_CM_INSTALL_LINES="${STUB_CM_INSTALL_LINES-}" \
+          "$STUB_SH" -c "$script" "${args[@]:j}"
+        exit ;;
       *'printf %s "$HOME"'*)
         # pm hc-add: $HOME of the container user; STUB_HOME_WARN adds a
         # podman warning on stderr, STUB_HOME_RC makes the exec fail
@@ -338,9 +350,9 @@ case ${1-} in
     cp -- "$src" "$s/fs/$ctr$path"
     exit 0 ;;
   rm)
-    for d in containers status mounts labels home pmscript create cores nohc nosha chezmoi; do rm -f -- "$s/$d/$last"; done
+    for d in containers status mounts labels home pmscript create cores nohc nosha; do rm -f -- "$s/$d/$last"; done
     # its files go with it
-    rm -rf -- "${s:?}/fs/$last" "${s:?}/cbin/$last"
+    rm -rf -- "${s:?}/fs/$last" "${s:?}/cbin/$last" "${s:?}/cmbin/$last"
     printf '%s\n' "$last"
     exit 0 ;;
   ps)

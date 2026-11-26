@@ -53,16 +53,62 @@ readme_section() {
   # the repo is the last argument, after the script and its $0
   [ "${CALL[${#CALL[@]}-1]}" = "$DEFAULT_REPO" ]
   [ "${CALL[${#CALL[@]}-2]}" = sh ]
-  [ "$(<"$STUB_STATE/chezmoi/pm-proj")" = "$DEFAULT_REPO" ]
   has_line "$output" "ok    chezmoi $DEFAULT_REPO applied in pm-proj"
+}
+
+@test "CMF1-02: the real script runs: the installer from curl gets init --one-shot --apply -- <repo>, in the home" {
+  local repo='example.org/u/dots"; touch pwned; echo "' h=$STUB_STATE/fs/pm-proj/home/vscode
+  PM_CHEZMOI_REPO=$repo run --separate-stderr pm run --cm --mount "$P" "$IMG"
+  expect_status 0
+  [ "$(cat "$h/installer-args")" = "$(printf '%s\n' init --one-shot --apply -- "$repo")" ] \
+    || fail "installer args: $(cat "$h/installer-args")"
+  [ "$(cat "$h/installer-pwd")" = "$h" ] || fail "installer ran in: $(cat "$h/installer-pwd")"
+  [[ ! -e $h/pwned && ! -e /pwned ]] || fail 'the repo ran as script text'
+  has_line "$output" "ok    chezmoi $repo applied in pm-proj"
+}
+
+@test "CMF1-02: the home of the container user, not /home/vscode" {
+  fake_container box
+  fake_home box /root
+  run --separate-stderr pm cm box
+  expect_status 0
+  [ "$(cat "$STUB_STATE/fs/box/root/installer-pwd")" = "$STUB_STATE/fs/box/root" ]
+}
+
+@test "CMF1-01: a failing curl is an error with its output, exit 1, and no installer runs" {
+  STUB_CM_CURL=fail run --separate-stderr pm run --cm --mount "$P" "$IMG"
+  expect_status 1
+  has_line "$stderr" "error pm-proj: chezmoi $DEFAULT_REPO failed with exit 6; its last output:"
+  has_line "$stderr" '      curl: (6) Could not resolve host: get.chezmoi.io/lb'
+  [[ ! -e $STUB_STATE/fs/pm-proj/home/vscode/installer-args ]] || fail 'the installer ran'
+  [[ $output != *'ok    chezmoi'* ]] || fail "output: $output"
+}
+
+@test "CMF1-01: without curl in the container, an error, exit 1" {
+  fake_container box
+  STUB_CM_CURL=missing run --separate-stderr pm cm box
+  expect_status 1
+  has_line "$stderr" "error box: chezmoi $DEFAULT_REPO failed with exit 127; its last output:"
+  [[ $stderr == *curl*'not found'* ]] || fail "stderr: $stderr"
+}
+
+@test "CMF1-07: a failing installer shows its last 20 output lines, indented, one per line" {
+  fake_container box
+  STUB_CM_INSTALL_RC=3 STUB_CM_INSTALL_LINES=25 run --separate-stderr pm cm box
+  expect_status 1
+  [ "${stderr%%$'\n'*}" = "error box: chezmoi $DEFAULT_REPO failed with exit 3; its last output:" ] \
+    || fail "stderr: $stderr"
+  local i
+  for (( i = 6; i <= 25; i++ )); do has_line "$stderr" "      line $i"; done
+  [[ $stderr != *'line 5'$'\n'* ]] || fail "more than 20 lines: $stderr"
+  [ "$(wc -l <<<"$stderr")" -eq 21 ] || fail "stderr: $stderr"
 }
 
 @test "C7: the script fetches the installer inside the container, from the home, as the user asked" {
   run --separate-stderr pm run --cm --mount "$P" "$IMG"
   expect_status 0
   cm_call pm-proj || { podman_show; fail 'no chezmoi exec'; }
-  [[ $SCRIPT == *'cd "$HOME"'* ]] || fail "script: $SCRIPT"
-  [[ $SCRIPT == *'sh -c "$(curl -fsLS get.chezmoi.io/lb)" -- init --one-shot --apply "$1"'* ]] \
+  [ "$SCRIPT" = 'cd "$HOME" && s=$(curl -fsLS get.chezmoi.io/lb) && sh -c "$s" -- init --one-shot --apply -- "$1"' ] \
     || fail "script: $SCRIPT"
   # podman exec, so curl runs in the container, never on the host
   [ "${CALL[0]}" = exec ]
@@ -96,14 +142,12 @@ readme_section() {
 }
 
 @test "D15: a failed chezmoi step is an error with its output; the later steps run, exit 1, the container stays" {
-  STUB_CM_RC=6 run --separate-stderr pm run --cm --cc --mount "$P" "$IMG"
+  STUB_CM_CURL=fail run --separate-stderr pm run --cm --cc --mount "$P" "$IMG"
   expect_status 1
-  [[ $stderr == *"error pm-proj: chezmoi $DEFAULT_REPO: "*'curl: (6) Could not resolve host: get.chezmoi.io'* ]] \
-    || fail "stderr: $stderr"
+  has_line "$stderr" "error pm-proj: chezmoi $DEFAULT_REPO failed with exit 6; its last output:"
   podman_find -x cp -- "$PM_CLAUDE_MD" pm-proj:/home/vscode/.claude/CLAUDE.md \
     || { podman_show; fail 'no --cc copy after the failed chezmoi step'; }
   if podman_find rm; then podman_show; fail 'pm removed the container'; fi
-  [[ ! -e $STUB_STATE/chezmoi/pm-proj ]]
 }
 
 @test "C7: --cm in any position before --, repeated, runs chezmoi once; without --cm, no chezmoi" {
@@ -118,6 +162,13 @@ readme_section() {
   run --separate-stderr pm run --mount "$P" "$IMG" c2
   expect_status 0
   if grep -q 'get.chezmoi.io' "$PODMAN_LOG"; then podman_show; fail 'chezmoi without --cm'; fi
+}
+
+@test "CMF1-10: after --, --cm is the container name, not the flag" {
+  run --separate-stderr pm run "$IMG" -- --cm
+  run_args
+  has_opt --name --cm || { podman_show; fail 'no --name --cm'; }
+  if grep -q 'get.chezmoi.io' "$PODMAN_LOG"; then podman_show; fail 'chezmoi after --'; fi
 }
 
 @test "D14: pm cm <container> runs the one-shot in a running container, by name or ID" {
@@ -150,9 +201,10 @@ readme_section() {
 
 @test "D14: pm cm with a failing one-shot is an error with its output, exit 1" {
   fake_container box
-  STUB_CM_RC=6 run --separate-stderr pm cm box
+  STUB_CM_CURL=fail run --separate-stderr pm cm box
   expect_status 1
-  [[ $stderr == *"error box: chezmoi $DEFAULT_REPO: "*'Could not resolve host'* ]] || fail "stderr: $stderr"
+  has_line "$stderr" "error box: chezmoi $DEFAULT_REPO failed with exit 6; its last output:"
+  has_line "$stderr" '      curl: (6) Could not resolve host: get.chezmoi.io/lb'
 }
 
 @test "D14: pm cm usage errors exit 2; --help names the command and PM_CHEZMOI_REPO" {
@@ -168,6 +220,24 @@ readme_section() {
   [ "${lines[0]}" = 'usage: pm cm <container>' ]
   [[ $output == *PM_CHEZMOI_REPO* && $output == *get.chezmoi.io/lb* && $output == *--one-shot* ]] \
     || fail "help: $output"
+  # CMF1-10: --help anywhere, and nothing runs
+  fake_container box
+  run --separate-stderr pm cm box --help
+  expect_status 0
+  [ "${lines[0]}" = 'usage: pm cm <container>' ]
+  if grep -q 'get.chezmoi.io' "$PODMAN_LOG"; then podman_show; fail 'chezmoi with --help'; fi
+}
+
+@test "CMF1-06: the runs: line of pm cm --help and the readme pass the repo as an argument" {
+  local want='s=$(curl -fsLS get.chezmoi.io/lb) && sh -c "$s" -- init --one-shot --apply -- "$1"'
+  run --separate-stderr pm cm --help
+  expect_status 0
+  [[ $output == *"$want"* && $output == *"' sh <repo>"* ]] || fail "help: $output"
+  run pm readme
+  expect_status 0
+  local sec
+  sec=$(readme_section "$output" CHEZMOI)
+  [[ $sec == *"$want"* && $sec == *"' sh <repo>"* ]] || fail "readme: $sec"
 }
 
 @test "C9: pm run --help has a --cm line and stays short; pm help lists cm and PM_CHEZMOI_REPO" {
@@ -225,6 +295,13 @@ cm_completion() {
   run --separate-stderr "$1" pm cm -
   expect_status 0
   [ "$(sed 1d <<<"$output" | tr '\n' ' ')" = '--help ' ] || fail "pm cm -: $output"
+  # CMF1-10: nothing follows --help
+  run --separate-stderr "$1" pm cm --help ''
+  expect_status 0
+  [ "$(sed 1d <<<"$output" | tr '\n' ' ')" = '' ] || fail "pm cm --help: $output"
+  run --separate-stderr "$1" pm cm --help -
+  expect_status 0
+  [ "$(sed 1d <<<"$output" | tr '\n' ' ')" = '' ] || fail "pm cm --help -: $output"
 }
 
 @test "C9 bash: completion offers cm, --cm once, and running containers for pm cm" {
@@ -242,7 +319,7 @@ cm_completion() {
   fake_container up
   local c a b
   local -a w
-  for c in "pm ''" "pm run -" "pm run --cm -" "pm run --cm ''" "pm cm ''" "pm cm -" "pm cm up ''"; do
+  for c in "pm ''" "pm run -" "pm run --cm -" "pm run --cm ''" "pm cm ''" "pm cm -" "pm cm up ''" "pm cm --help ''" "pm cm --help -"; do
     eval "w=($c)"
     a=$(bash_candidates "${w[@]}" | sort)
     b=$(zsh_candidates "${w[@]}" | sort)
