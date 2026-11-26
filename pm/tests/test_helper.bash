@@ -42,7 +42,14 @@ stub_setup() {
   PM_PATH=$FAKE_BIN:$PATH
   # never reach a real podman
   [[ $(command -v podman) == "$STUB_BIN/podman" ]] || fail 'the fake podman is not first in PATH'
+  # no host core by default, whatever runs on the test host; a test that
+  # wants one fakes ps again: fake ps "printf '%s hc serve\n' $$"
+  fake ps 'true'
 }
+
+# host_core_up: pm sees a running hc core on this host (a process in its
+# own pid namespace)
+host_core_up() { fake ps "printf '%s hc serve\n' $$"; }
 
 # PM_PATH without the optional tools pm may use (git, uuidgen, sha256sum,
 # shasum, openssl): the fakes, the fake podman, and basic commands only
@@ -199,8 +206,10 @@ main_is() {
   done
 }
 
-# fake_container <name> [<pm-hc label> [<mount source>...]]: a fake
-# container as podman run leaves it, without a podman call in the log
+# fake_container <name> [<pm-hc label> [<mount>...]]: a fake container as
+# podman run leaves it, without a podman call in the log; a mount is
+# <source> or <source>:<target>; pm no longer reads the label (V9-49), so
+# tests pass one only to show that it has no effect
 fake_container() {
   printf '\n' >"$STUB_STATE/containers/$1"
   [[ -z ${2-} ]] || printf '%s\n' "$2" >"$STUB_STATE/labels/$1"

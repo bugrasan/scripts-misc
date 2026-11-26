@@ -16,6 +16,7 @@ setup() {
 CASES=("pm run -" "pm run --hc -" "pm.sh run --mount x --hc img --"
   "pm run --cc --hc --net n1 --h" "pm run --hc ''" "pm run --hc --mount x ''"
   "pm rm -" "pm rm ''" "pm rm pm-x -" "pm.sh rm --force ''" "pm rm -f ''"
+  "pm rm --hc-rm -" "pm rm --force pm-x --hc-rm -" "pm rm --hc-rm --force ''" "pm rm pm-x --hc-rm ''"
   "pm ''" "pm hc-add ''" "pm hc-rm -" "pm doctor ''" "pm ps -" "pm ps -a -" "pm ps --agents -")
 
 # candidates: the candidates in $output (after the kind line), sorted, on
@@ -26,10 +27,23 @@ candidates() { sed 1d <<<"$output" | LC_ALL=C sort | tr '\n' ' '; }
 rm_completion() {
   run --separate-stderr "$1" pm rm -
   expect_status 0
-  [ "$(candidates)" = '--force --help ' ] || fail "pm rm -: $(candidates)"
+  [ "$(candidates)" = '--force --hc-rm --help ' ] || fail "pm rm -: $(candidates)"
   run --separate-stderr "$1" pm rm pm-x -
   expect_status 0
-  [ "$(candidates)" = '--force ' ] || fail "pm rm pm-x -: $(candidates)"
+  [ "$(candidates)" = '--force --hc-rm ' ] || fail "pm rm pm-x -: $(candidates)"
+  # V9-53: each flag once, in any position, and one container
+  run --separate-stderr "$1" pm rm --hc-rm -
+  expect_status 0
+  [ "$(candidates)" = '--force ' ] || fail "pm rm --hc-rm -: $(candidates)"
+  run --separate-stderr "$1" pm rm --force pm-x --hc-rm -
+  expect_status 0
+  [ "$(candidates)" = '' ] || fail "pm rm --force pm-x --hc-rm -: $(candidates)"
+  run --separate-stderr "$1" pm rm --hc-rm --force ''
+  expect_status 0
+  [ "$(candidates)" = 'pm-x ' ] || fail "pm rm --hc-rm --force: $(candidates)"
+  run --separate-stderr "$1" pm rm pm-x --hc-rm ''
+  expect_status 0
+  [ "$(candidates)" = '' ] || fail "pm rm pm-x --hc-rm: $(candidates)"
   run --separate-stderr "$1" pm rm --force ''
   expect_status 0
   [ "$(candidates)" = 'pm-x ' ] || fail "pm rm --force: $(candidates)"
@@ -45,6 +59,8 @@ rm_completion() {
 # v9_completion <bash_candidates|zsh_candidates>: hc-add, hc-rm, doctor,
 # and pm ps --agents
 v9_completion() {
+  # the fake podman lists the fake containers themselves
+  unset STUB_PS
   fake_container up pm-up
   fake_container down pm-down
   printf 'exited\n' >"$STUB_STATE/status/down"
@@ -54,13 +70,17 @@ v9_completion() {
   has_line "$output" hc-add
   has_line "$output" hc-rm
   has_line "$output" doctor
-  # hc-add: running containers with the pm-hc label; hc-rm: all with it
+  # V9-50, V9-51: hc-add offers every running container, hc-rm every
+  # container, labeled or not
   run --separate-stderr "$1" pm hc-add ''
   expect_status 0
-  [ "$(candidates)" = 'up ' ] || fail "pm hc-add: $(candidates)"
+  [ "$(candidates)" = 'plain up ' ] || fail "pm hc-add: $(candidates)"
   run --separate-stderr "$1" pm hc-rm ''
   expect_status 0
-  [ "$(candidates)" = 'down up ' ] || fail "pm hc-rm: $(candidates)"
+  [ "$(candidates)" = 'down plain up ' ] || fail "pm hc-rm: $(candidates)"
+  if podman_find ps; then
+    [[ " ${CALLS[*]} " != *label=pm-hc* ]] || fail 'completion filters by the pm-hc label'
+  fi
   # doctor takes no arguments, only --help
   run --separate-stderr "$1" pm doctor ''
   expect_status 0

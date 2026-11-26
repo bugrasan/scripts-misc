@@ -662,9 +662,11 @@ esac'
     /etc/machine-id "$STATE_TARGET" config.toml 'shell = [ "/bin/bash" ]' 'hc serve' SIGTERM \
     'podman logs' 'hc server stop' 'hc server restart' 'hc update' 'hc machine update' \
     'restart policy' 'podman exec -i <container-name> sh -c' 'exactly' \
-    'hc machine' 'pm-hc=<container-name>' 'pm start' rollback 'pm rm'; do
+    'hc machine' 'pm hc-add' 'pm start' rollback 'pm rm'; do
     [[ $section == *"$s"* ]] || fail "the herdr-core section lacks: $s"
   done
+  # V9-49: no pm-hc label anywhere in the help
+  [[ $output != *pm-hc* ]] || fail "pm run --help names pm-hc: $output"
   # decisions 1, 3, 4: the runs block has the main command, the config, no
   # SHELL, and the machine with a bare podman
   [[ $output == *"sh -c 'exec hc serve >/dev/null 2>&1'"* ]] || fail 'runs: lacks the main command'
@@ -701,10 +703,12 @@ esac'
     'hc machine update' 'restart policy' 'podman exec -i <container> sh -c' \
     'absolute podman path' \
     'only one core runs per state folder' .devcontainer/devcontainer.json \
-    '.devcontainer/<name>/devcontainer.json' 'hc exec --on' 'pm-hc=' \
-    'pm start' 'pm rm'; do
+    '.devcontainer/<name>/devcontainer.json' 'hc exec --on' 'pm hc-add' \
+    'pm hc-rm' 'pm rm --hc-rm' 'pm start' 'pm rm'; do
     [[ $section == *"$s"* ]] || fail "the HERDR-CORE section lacks: $s"
   done
+  # V9-49: no pm-hc label in the readme
+  [[ $output != *pm-hc* ]] || fail 'pm readme names pm-hc'
   # D23: one container per folder, with its limits
   has_line "$output" 'ONE CONTAINER PER FOLDER'
   section=${output#*$'\n'ONE CONTAINER PER FOLDER$'\n'}

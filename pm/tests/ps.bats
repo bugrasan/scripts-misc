@@ -92,6 +92,18 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   [ "$(ps_cell HOST-HERDR "$(ps_row pm-proj)")" = unavailable ]
 }
 
+@test "V9-49: HOST-HERDR looks up the machine by the container name, not by a pm-hc label" {
+  fake_container pm-a other
+  host_core_up
+  FAKE_HC_LS=$(machines "$(hc_machine pm-a "$(pm_via pm-a)")")
+  export FAKE_HC_LS
+  run --separate-stderr pm ps
+  expect_status 0
+  [ "$(ps_cell HOST-HERDR "$(ps_row pm-a)")" = yes ]
+  podman_find container inspect || { podman_show; fail 'no inspect'; }
+  [[ " ${CALL[*]} " != *pm-hc* ]] || fail "pm ps reads the pm-hc label: ${CALL[*]}"
+}
+
 @test "decision 4: HOST-HERDR is yes only for the exact connection; an absolute podman path is no" {
   fake_container pm-a pm-a
   fake_container pm-b pm-b

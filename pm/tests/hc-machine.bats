@@ -76,11 +76,11 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
 
 # ------------------------------------------------------------------ D17
 
-@test "D17: pm run --hc labels the container pm-hc=<name>; without --hc there is no such label" {
+@test "V9-49: pm run adds no pm-hc label, with or without --hc" {
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
   run_args
-  has_opt --label pm-hc=pm-proj
+  [[ " ${RUN[*]} " != *' pm-hc='* ]] || fail "label in: ${RUN[*]}"
   forget_containers
   run --separate-stderr pm run --mount "$P" "$IMG" c2
   expect_status 0
@@ -197,8 +197,9 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
 
 # ------------------------------------------------------------------ D21
 
-@test "D21: pm rm removes the hc machine of a labeled container that still has pm's connection" {
-  fake_container pm-x pm-x
+@test "V9-52: while the host core runs, pm rm removes the hc machine of any container that still has pm's connection" {
+  host_core_up
+  fake_container pm-x
   FAKE_HC_LS=$(machines "$(hc_machine pm-x "$(pm_via pm-x)")")
   export FAKE_HC_LS
   run --separate-stderr pm rm --force pm-x
@@ -208,28 +209,42 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
     || fail "order: $output"
 }
 
-@test "D21: an entry that is gone or not pm's, or no hc, gives a skip line" {
-  fake_container pm-x pm-x
+@test "V9-52: pm rm names the machine after the container, not after a pm-hc label of an earlier v9 build" {
+  host_core_up
+  fake_container pm-x other
+  FAKE_HC_LS=$(machines "$(hc_machine pm-x "$(pm_via pm-x)")" "$(hc_machine other "$(pm_via other)")")
+  export FAKE_HC_LS
+  run --separate-stderr pm rm --force pm-x
+  expect_status 0
+  hc_find -x machine rm -- pm-x || { hc_show; fail 'no hc machine rm pm-x'; }
+  if hc_find -x machine rm -- other; then hc_show; fail 'pm removed the machine of the label'; fi
+}
+
+@test "V9-52: an entry that is gone or not pm's, or no hc, gives a skip line" {
+  host_core_up
+  fake_container pm-x
   run --separate-stderr pm rm --force pm-x
   expect_status 0
   has_line "$output" 'skip  hc machine pm-x: not in hc machine ls'
 
-  fake_container pm-x pm-x
+  fake_container pm-x
   FAKE_HC_LS=$(machines "$(hc_machine pm-x 'ssh box' false)") run --separate-stderr pm rm --force pm-x
   expect_status 0
   has_line "$output" 'skip  hc machine pm-x: another connection; kept'
   if hc_find machine rm; then hc_show; fail 'pm removed the machine'; fi
 
-  fake_container pm-x pm-x
+  fake_container pm-x
   rm -- "$STUB_BIN/hc"
   use_min_path
+  host_core_up
   run --separate-stderr pm rm --force pm-x
   expect_status 0
   has_line "$output" 'skip  hc machine pm-x: no hc on PATH'
 }
 
-@test "D21: a failing hc machine rm is a red error and exit 1, after the container is gone" {
-  fake_container pm-x pm-x
+@test "V9-52: a failing hc machine rm is a red error and exit 1, after the container is gone" {
+  host_core_up
+  fake_container pm-x
   FAKE_HC_LS=$(machines "$(hc_machine pm-x "$(pm_via pm-x)")")
   export FAKE_HC_LS FAKE_HC_RM_RC=4 FAKE_HC_RM_OUT='{"error":{"kind":"machine_unknown"}}'
   run --separate-stderr pm rm --force pm-x
@@ -239,11 +254,53 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   [[ ! -e $STUB_STATE/containers/pm-x ]]
 }
 
-@test "D21: containers without the pm-hc label get no hc calls from pm rm" {
-  fake_container pm-y
-  run --separate-stderr pm rm --force pm-y
+@test "V9-52: without a running host core, pm rm asks hc nothing and gives a skip line" {
+  fake_container pm-x
+  FAKE_HC_LS=$(machines "$(hc_machine pm-x "$(pm_via pm-x)")")
+  export FAKE_HC_LS
+  run --separate-stderr pm rm --force pm-x
   expect_status 0
+  has_line "$output" 'ok    container pm-x removed'
+  has_line "$output" 'skip  hc machine pm-x: hc core on this host not running; not checked'
   [ ! -s "$HC_LOG" ] || { hc_show; fail 'hc was called'; }
+}
+
+@test "V9-53: pm rm --hc-rm asks hc also without a running host core, in any order with --force" {
+  local args
+  for args in '--hc-rm pm-x --force' '--force --hc-rm pm-x' 'pm-x --hc-rm --force'; do
+    fake_container pm-x
+    : >"$HC_LOG"
+    FAKE_HC_LS=$(machines "$(hc_machine pm-x "$(pm_via pm-x)")")
+    export FAKE_HC_LS
+    # shellcheck disable=SC2086  # split the arguments on purpose
+    run --separate-stderr pm rm $args
+    expect_status 0
+    hc_find -x machine rm -- pm-x || { hc_show; fail "no hc machine rm for: $args"; }
+    has_line "$output" 'ok    hc machine pm-x removed'
+  done
+  # a machine that is gone or not pm's stays a skip line
+  fake_container pm-x
+  FAKE_HC_LS=$(machines "$(hc_machine pm-x 'ssh box' false)") run --separate-stderr pm rm --hc-rm --force pm-x
+  expect_status 0
+  has_line "$output" 'skip  hc machine pm-x: another connection; kept'
+}
+
+@test "V9-53: pm rm --hc-rm without hc on PATH is an error, exit 1, and the container stays" {
+  fake_container pm-x
+  rm -- "$STUB_BIN/hc"
+  use_min_path
+  run --separate-stderr pm rm --force --hc-rm pm-x
+  expect_status 1
+  has_line "$stderr" 'error no hc on PATH; install it on this host to remove the hc machine pm-x'
+  [[ -e $STUB_STATE/containers/pm-x ]] || fail 'pm removed the container'
+  if podman_find rm; then podman_show; fail 'pm ran podman rm'; fi
+}
+
+@test "V9-53: pm rm --hc-rm twice is a usage error" {
+  fake_container pm-x
+  run --separate-stderr pm rm --hc-rm --hc-rm pm-x
+  expect_status 2
+  [[ $stderr == 'usage: pm rm'* ]] || fail "stderr: $stderr"
 }
 
 # ------------------------------------------------------------------ Q24
@@ -265,12 +322,14 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   run pm help
   expect_status 0
   has_line "$output" '  start      <container>'
-  has_line "$output" '  rm         [--force] <container>  remove it, its pm network once unused, and its hc machine'
+  has_line "$output" '  rm         [--force] [--hc-rm] <container>  remove it, its pm network once unused, and its hc machine'
   run pm start --help
   expect_status 0
   [[ $output == *'podman start <container>'* && $output == *'hc serve'* ]] \
     || fail "pm start --help: $output"
   run pm rm --help
   expect_status 0
-  [[ $output == *'hc machine rm <container>'* && $output == *pm-hc* ]] || fail "pm rm --help: $output"
+  [[ $output == 'usage: pm rm [--force] [--hc-rm] <container>'* ]] || fail "pm rm --help: $output"
+  [[ $output == *'hc machine rm <container>'* && $output == *--hc-rm* && $output != *pm-hc* ]] \
+    || fail "pm rm --help: $output"
 }

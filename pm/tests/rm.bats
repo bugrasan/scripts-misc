@@ -43,6 +43,13 @@ setup() {
   [ ! -s "$PODMAN_LOG" ] || { podman_show; fail 'podman was called'; }
 }
 
+@test "V9-53: pm rm --help names --hc-rm and when pm rm asks hc" {
+  run pm rm --help
+  expect_status 0
+  [[ $output == *'  --hc-rm '* ]] || fail "no option line for --hc-rm: $output"
+  [[ $output == *'hc core on this host runs'* ]] || fail "help: $output"
+}
+
 @test "V9-05: a running container without --force is refused with a --force hint" {
   run --separate-stderr pm rm pm-x
   expect_status 1
@@ -60,13 +67,13 @@ setup() {
 @test "V9-05: pm rm --help, pm help, and pm readme show --force and no -f" {
   run pm rm --help
   expect_status 0
-  [ "${lines[0]}" = 'usage: pm rm [--force] <container>' ]
+  [ "${lines[0]}" = 'usage: pm rm [--force] [--hc-rm] <container>' ]
   has_line "$output" '  --force      stop a running container first'
   # the podman call itself keeps podman's -f
   has_line "$output" 'runs: podman rm [-f] <container>'
   run pm help
   expect_status 0
-  has_line "$output" '  rm         [--force] <container>  remove it, its pm network once unused, and its hc machine'
+  has_line "$output" '  rm         [--force] [--hc-rm] <container>  remove it, its pm network once unused, and its hc machine'
   run pm readme
   expect_status 0
   [[ $output == *'pm rm --force pm-myapp'* ]] || fail 'the readme lacks pm rm --force'

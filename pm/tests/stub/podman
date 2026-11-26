@@ -38,7 +38,7 @@
 #                       peak of those running at once lands in execs.max
 #   STUB_IMAGES, STUB_NETWORKS, STUB_PS
 #                       lines `image list`, `network ls`, and `ps` (without
-#                       -q or a pm-hc label filter) print
+#                       -q) print; unset STUB_PS lists the fake containers
 
 # one write per call, as pm runs some podman calls at the same time
 line=$(printf '%q ' "$@")
@@ -100,7 +100,7 @@ case ${1-} in
         fmt=$4
         # the formats of pm ps and the mount scan of pm run inspect all
         # given containers at once; fields as pm asks
-        if [[ $fmt == *NetworkMode* || $fmt == *.Mounts* ]]; then
+        if [[ $fmt == *NetworkMode* || $fmt == '{{.Name}}'*.Mounts* ]]; then
           for id in "${@:5}"; do
             [[ -e $c/$id ]] || continue
             net=$(val containers "$id") ms='' secs=''
@@ -136,6 +136,14 @@ case ${1-} in
             status "$last"
             [[ $fmt != *pm-hc* ]] || printf '%s\n' "$(jlabel "$last")"
             printf '%s\n' "$(val containers "$last")" ;;
+          # pm hc-add: the state, then each mount target after a unit
+          # separator
+          '{{.State.Status}}'*.Mounts*)
+            ms=''
+            if [[ -e $s/mounts/$last ]]; then
+              while IFS= read -r m; do ms+=$us${m#*:}; done <"$s/mounts/$last"
+            fi
+            printf '%s\n' "$(status "$last")$ms" ;;
           # pm hc-add: the pm-hc label as json and the state
           *pm-hc*State.Status*) printf '%s\n' "$(jlabel "$last")$us$(status "$last")" ;;
           # pm start, pm hc-rm: the pm-hc label as json
@@ -310,14 +318,26 @@ case ${1-} in
         [[ -e $f ]] || continue
         [[ " $* " == *' -a '* || $(status "${f##*/}") == running ]] && printf '%s\n' "${f##*/}"
       done
-    elif [[ $* == *label=pm-hc* ]]; then
-      # completion: the names with the pm-hc label, running ones unless --all
-      for f in "$s"/labels/*; do
-        [[ -e $f ]] || continue
-        [[ " $* " == *' --all '* || $(status "${f##*/}") == running ]] && printf '%s\n' "${f##*/}"
-      done
-    else
+    elif [[ -n ${STUB_PS+set} || " $* " != *' {{.Names}} '* ]]; then
       [[ -z ${STUB_PS-} ]] || printf '%s\n' "$STUB_PS"
+    else
+      # completion without STUB_PS: the names of the fake containers,
+      # running ones unless --all or -a, then those in any of the states
+      # that --filter status=<state> names; any other filter (network=,
+      # volume=) lists nothing, as before
+      want=() args=("$@")
+      for (( i = 1; i < ${#args[@]} - 1; i++ )); do
+        [[ ${args[i]} == --filter ]] || continue
+        [[ ${args[i+1]} == status=* ]] || exit 0
+        want+=("${args[i+1]#status=}")
+      done
+      for f in "$c"/*; do
+        [[ -e $f ]] || continue
+        st=$(status "${f##*/}")
+        [[ " $* " == *' --all '* || " $* " == *' -a '* || $st == running ]] || continue
+        (( ${#want[@]} == 0 )) || [[ " ${want[*]} " == *" $st "* ]] || continue
+        printf '%s\n' "${f##*/}"
+      done
     fi
     exit 0 ;;
   image) [[ -z ${STUB_IMAGES-} ]] || printf '%s\n' "$STUB_IMAGES"; exit 0 ;;
