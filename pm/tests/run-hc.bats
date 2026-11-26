@@ -652,7 +652,7 @@ esac'
 @test "H2: pm run --help shows --hc, and the readme the herdr-core details" {
   run --separate-stderr pm run --help
   expect_status 0
-  [ "${lines[0]}" = 'usage: pm run [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]' ]
+  [ "${lines[0]}" = 'usage: pm run [--cc] [--cp] [--cm] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]' ]
   grep -qE '^  --hc +[a-z]' <<<"$output" || fail 'no option line for --hc'
   [[ $output == *'pm readme'* ]] || fail 'no pointer to pm readme'
   [[ $output != *pm-hc* ]] || fail "pm run --help names pm-hc: $output"

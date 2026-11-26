@@ -36,6 +36,8 @@
 #   STUB_STOP_RC        exit status of `stop` (default 0)
 #   STUB_HCCONF_RC      exit status of the herdr-core config.toml write of
 #                       pm run --hc, which then writes nothing
+#   STUB_CM_RC          exit status of the chezmoi one-shot of pm run --cm
+#                       and pm cm, which then records nothing in chezmoi/
 #   STUB_CP_RC          exit status of `cp` (default 0)
 #   STUB_NET_CREATE_RC  exit status of `network create` (default 0)
 #   STUB_STATUS         state of containers without a status file
@@ -259,6 +261,18 @@ case ${1-} in
     fi
     # shellcheck disable=SC2016  # pm's literal script, matched as text
     case $* in
+      *get.chezmoi.io/lb*)
+        # pm run --cm, pm cm: the chezmoi one-shot; records the repo (the
+        # last argument) in chezmoi/<name>; STUB_CM_RC makes it fail as an
+        # unreachable installer does
+        if [[ -n ${STUB_CM_RC-} ]]; then
+          echo 'curl: (6) Could not resolve host: get.chezmoi.io' >&2
+          exit "$STUB_CM_RC"
+        fi
+        echo 'info installed /home/vscode/.local/bin/chezmoi' >&2
+        mkdir -p -- "$s/chezmoi"
+        printf '%s\n' "${args[${#args[@]}-1]}" >"$s/chezmoi/$ctr"
+        exit 0 ;;
       *'printf %s "$HOME"'*)
         # pm hc-add: $HOME of the container user; STUB_HOME_WARN adds a
         # podman warning on stderr, STUB_HOME_RC makes the exec fail
@@ -324,7 +338,7 @@ case ${1-} in
     cp -- "$src" "$s/fs/$ctr$path"
     exit 0 ;;
   rm)
-    for d in containers status mounts labels home pmscript create cores nohc nosha; do rm -f -- "$s/$d/$last"; done
+    for d in containers status mounts labels home pmscript create cores nohc nosha chezmoi; do rm -f -- "$s/$d/$last"; done
     # its files go with it
     rm -rf -- "${s:?}/fs/$last" "${s:?}/cbin/$last"
     printf '%s\n' "$last"

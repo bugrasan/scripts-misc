@@ -19,9 +19,9 @@ setup() {
   local -a all
   mapfile -t all <<<"$output"
   (( ${#all[@]} <= 25 )) || fail "pm run --help has ${#all[@]} lines"
-  [ "${lines[0]}" = 'usage: pm run [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]' ]
+  [ "${lines[0]}" = 'usage: pm run [--cc] [--cp] [--cm] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]' ]
   local o
-  for o in --cc --cp --hc '--mount <dir>' '--mnt <dir>' '--net <name>' '<image>' '<container-name>'; do
+  for o in --cc --cp --cm --hc '--mount <dir>' '--mnt <dir>' '--net <name>' '<image>' '<container-name>'; do
     grep -qE "^  $o +[a-zA-Z<]" <<<"$output" || fail "no option line for $o"
   done
   # --mount names both mounts, the worktrees one with its target

@@ -28,7 +28,7 @@ stub_setup() {
   HC=$HOME/.config/herdr-core/container
   P=$T/proj
   mkdir -p "$HOME" "$STUB_BIN" "$FAKE_BIN" "$P"
-  mkdir -p "$STUB_STATE"/{containers,networks,status,mounts,labels,ids,home,pmscript,create,secrets,cores,nohc,nosha,fs,cbin}
+  mkdir -p "$STUB_STATE"/{containers,networks,status,mounts,labels,ids,home,pmscript,create,secrets,cores,nohc,nosha,chezmoi,fs,cbin}
   # what the fake podman needs to run pm's in-container scripts
   STUB_SH=$(command -v sh) STUB_BASH=$BASH STUB_HASH_TOOL=$PM_TESTS_DIR/stub/hash-tool
   export STUB_SH STUB_BASH STUB_HASH_TOOL
@@ -227,7 +227,7 @@ fake_home() { printf '%s\n' "$2" >"$STUB_STATE/home/$1"; }
 # the same folder is no second container
 forget_containers() {
   local d
-  for d in containers status mounts labels ids home pmscript create secrets cores nohc nosha; do
+  for d in containers status mounts labels ids home pmscript create secrets cores nohc nosha chezmoi; do
     rm -f -- "$STUB_STATE/$d"/*
   done
   # their files go with them
