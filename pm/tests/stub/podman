@@ -257,6 +257,7 @@ case ${1-} in
       echo 'Error: can only create exec sessions on running containers: container state improper' >&2
       exit 255
     fi
+    # shellcheck disable=SC2016  # pm's literal script, matched as text
     case $* in
       *'printf %s "$HOME"'*)
         # pm hc-add: $HOME of the container user

@@ -294,9 +294,10 @@ _pm_hc_via() { printf 'podman exec -i %s sh -c\n' "$1"; }
 # it, through herdr-core's own config.toml, which it reads for each new
 # shell, so the container keeps no SHELL for other tools; only when the
 # file is missing (set -C); written as the container user, folder and all;
+# $2 is that user's home (default /home/vscode, as pm run --hc makes it);
 # an ok line, a skip line, or an error
 _pm_hc_config() {
-  local f=/home/vscode/.config/herdr-core/config.toml out rc=0
+  local f=${2:-/home/vscode}/.config/herdr-core/config.toml out rc=0
   local line='shell = [ "/bin/bash" ]'
   out=$(printf '%s\n' "$line" | podman exec -i -- "$1" sh -c \
     '[ ! -e "$1" ] || exit 3; mkdir -p -- "${1%/*}" && set -C && cat >"$1"' sh "$f" 2>&1) || rc=$?
@@ -800,16 +801,18 @@ pm created for it once no other container uses that network
                before anything is removed
   <container>  container to remove; completion lists all containers
 
-the hc machine is the one named after the container; pm removes it only
-while it has exactly the connection pm run --hc and pm hc-add give it;
-pm asks hc only while the hc core on this host runs, as hc machine ls
-would start one, else a skip line; --hc-rm asks anyway
+the hc machine is the one named after the container, also when <container>
+is an ID; pm removes it only while it has exactly the connection pm run
+--hc and pm hc-add give it; pm asks hc only while the hc core on this host
+runs, as hc machine ls would start one, else a skip line; --hc-rm asks
+anyway; after podman rename, the machine of the old name stays: remove it
+in the herdr app or with hc machine rm <old name>
 
 runs: podman rm [-f] <container>
       hc machine rm <container>  (while the hc core on this host runs, or
       with --hc-rm)
       podman network rm <network>'
-  local force=0 hcrm=0 c='' a out state net label users rc=0
+  local force=0 hcrm=0 c='' a out name state net label users rc=0
   local -a lines rmopt=()
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
   # pm's force options are long only, so -f falls under unknown options;
@@ -823,23 +826,24 @@ runs: podman rm [-f] <container>
     esac
   done
   [[ -n $c ]] || { _pm_usage "$help"; return 2; }
-  # --hc-rm promises the machine removal, so fail before removing anything
-  if (( hcrm )) && ! command -v hc >/dev/null 2>&1; then
-    _pm_err "no hc on PATH; install it on this host to remove the hc machine $c"
-    return 1
-  fi
 
-  # read state and networks first: both vanish with the container; stderr
-  # stays out of the parsed lines: podman warnings would corrupt them
+  # read name, state, and networks first: all vanish with the container;
+  # the name, not an ID the user gave, names the hc machine; stderr stays
+  # out of the parsed lines: podman warnings would corrupt them
   if ! out=$(podman container inspect --format \
-    '{{.State.Status}}{{range $k, $v := .NetworkSettings.Networks}}{{"\n"}}{{$k}}{{end}}' \
+    '{{.Name}}{{"\n"}}{{.State.Status}}{{range $k, $v := .NetworkSettings.Networks}}{{"\n"}}{{$k}}{{end}}' \
     -- "$c" 2>/dev/null); then
     out=$(podman container inspect -- "$c" 2>&1 >/dev/null)
     _pm_err "container $c: $out"
     return 1
   fi
   mapfile -t lines <<<"$out"
-  state=${lines[0]}
+  name=${lines[0]} state=${lines[1]-}
+  # --hc-rm promises the machine removal, so fail before removing anything
+  if (( hcrm )) && ! command -v hc >/dev/null 2>&1; then
+    _pm_err "no hc on PATH; install it on this host to remove the hc machine $name"
+    return 1
+  fi
   if [[ $state == running || $state == paused ]] && (( ! force )); then
     _pm_err "container $c is $state; stop it with: pm stop $c, or use: pm rm --force $c"
     return 1
@@ -856,13 +860,13 @@ runs: podman rm [-f] <container>
   # hc machine ls would start a stopped host core, so only --hc-rm asks
   # hc then (V9-52, V9-53)
   if (( hcrm )) || ! command -v hc >/dev/null 2>&1 || _pm_host_core_running; then
-    _pm_hc_rm "$c" || rc=1
+    _pm_hc_rm "$name" || rc=1
   else
-    _pm_skip "hc machine $c: hc core on this host not running; not checked"
+    _pm_skip "hc machine $name: hc core on this host not running; not checked"
   fi
 
   # only networks with the pm-script label; podman's own stay untouched
-  for net in "${lines[@]:1}"; do
+  for net in "${lines[@]:2}"; do
     [[ -n $net ]] || continue
     label=$(podman network inspect --format '{{index .Labels "pm-script"}}' "$net" 2>/dev/null) \
       || continue
@@ -943,12 +947,14 @@ lists all networks with the containers attached to each
 
 # ------------------------------------------------------------------ pm hc-add / hc-rm
 
-# the state of container $1, then its mount targets, one per line, from
-# one inspect; a red error line when podman does not know the container
+# the name of container $1 (which may be an ID), its state, then its mounts
+# as <type><RS><target>, one per line, from one inspect; a red error line
+# when podman does not know the container
 _pm_ctr_mounts() {
-  local out us=$'\x1f'
+  local out us=$'\x1f' rs=$'\x1e'
   if ! out=$(podman container inspect --format \
-    "{{.State.Status}}{{range .Mounts}}$us{{.Destination}}{{end}}" -- "$1" 2>/dev/null); then
+    "{{.Name}}$us{{.State.Status}}{{range .Mounts}}$us{{.Type}}$rs{{.Destination}}{{end}}" \
+    -- "$1" 2>/dev/null); then
     out=$(podman container inspect -- "$1" 2>&1 >/dev/null)
     _pm_err "container $1: $out"
     return 1
@@ -966,55 +972,64 @@ missing, else a skip line, then the machine; it keeps a machine of that
 name with exactly pm's connection and stops with an error for one with
 another; the core in the container starts on the first connection
 
-  <container>  running container whose name hc takes as a machine name;
-               completion lists the running containers
+  <container>  running container, by name or ID, whose name hc takes as a
+               machine name; completion lists the running containers
 
-a container without the mounts of pm run --hc at /etc/machine-id and
-/home/vscode/.local/state/herdr-core gets a note: its hc identity and state
-end with the container; pm run --hc makes a container that keeps them
+a container without the bind mounts of pm run --hc at /etc/machine-id and
+~/.local/state/herdr-core (the home of the container user) gets a note:
+its hc identity and state end with the container; pm run --hc makes a
+container that keeps them
 
+runs: podman exec <name> sh -c 'printf %s \"\$HOME\"'  (the user's home)
 runs: podman exec -i <name> sh -c ...  (config.toml, when missing)
 runs: hc machine add --name <name> --via 'podman exec -i <name> sh -c'
 needs: hc on PATH
 note: the hc machine ls before hc machine add starts the hc core on this
       host when none runs"
-  local out state t m hcstate=/home/vscode/.local/state/herdr-core rc=0
+  local out name state home t m rc=0 rs=$'\x1e'
   local -a info missing=()
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
   if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
   out=$(_pm_ctr_mounts "$1") || return 1
   mapfile -t info <<<"$out"
-  state=${info[0]}
+  # the name, not an ID the user gave, names the hc machine
+  name=${info[0]} state=${info[1]-}
   if [[ $state != running ]]; then
-    _pm_err "container $1 is $state; start it with: pm start $1"
+    _pm_err "container $name is $state; start it with: pm start $name"
     return 1
   fi
-  if ! _pm_hc_name_ok "$1"; then
-    _pm_err "hc cannot use $1 as a machine name: 1-32 of a-z 0-9 - _ ., a letter or digit first, not like t7"
+  if ! _pm_hc_name_ok "$name"; then
+    _pm_err "hc cannot use $name as a machine name: 1-32 of a-z 0-9 - _ ., a letter or digit first, not like t7"
     return 1
   fi
   if ! command -v hc >/dev/null 2>&1; then
-    _pm_err "no hc on PATH; install it on this host to add $1 as an hc machine"
+    _pm_err "no hc on PATH; install it on this host to add $name as an hc machine"
+    return 1
+  fi
+  # any image may have another user than vscode, so ask for its home once
+  # shellcheck disable=SC2016  # $HOME expands in the container's sh
+  if ! home=$(podman exec -- "$name" sh -c 'printf %s "$HOME"' 2>&1) || [[ $home != /* ]]; then
+    _pm_err "$name: cannot read the home of the container user: ${home//$'\n'/ }"
     return 1
   fi
 
   # the identity and state survive a new container only through the two
   # bind mounts of pm run --hc; podman cannot add mounts later (V9-50)
-  for t in /etc/machine-id "$hcstate"; do
-    for m in "${info[@]:1}"; do [[ $m == "$t" ]] && continue 2; done
+  for t in /etc/machine-id "$home/.local/state/herdr-core"; do
+    for m in "${info[@]:2}"; do [[ $m == "bind$rs$t" ]] && continue 2; done
     missing+=("$t")
   done
   if (( ${#missing[@]} )); then
     t=${missing[0]}
     (( ${#missing[@]} == 1 )) || t+=" and ${missing[1]}"
     printf 'pm hc-add: note: %s does not mount %s from the host, so its hc identity and state end with the container; pm run --hc makes a container that keeps them\n' \
-      "$1" "$t" >&2
+      "$name" "$t" >&2
   fi
 
   # the same steps as pm run --hc; a failed config write still adds the
   # machine, as there
-  _pm_hc_config "$1" || rc=1
-  _pm_hc_add "$1" 'pm hc-add' || rc=1
+  _pm_hc_config "$name" "$home" || rc=1
+  _pm_hc_add "$name" 'pm hc-add' || rc=1
   return $rc
 }
 
@@ -1024,21 +1039,27 @@ pm_hc_rm() {
 removes the hc machine named after a container from hc on this host, as pm
 rm does, whoever added it; the container stays, running or not
 
-  <container>  existing container; completion lists all containers
+  <container>  existing container, by name or ID; completion lists all
+               containers
 
 a machine that is gone gives a skip line; one with another connection is an
 error, as pm removes only its own, with exactly podman exec -i <name> sh -c;
 remove a machine of a container that is gone in the herdr app or with hc
-machine rm
+machine rm; after podman rename, the machine of the old name stays: remove
+it in the herdr app or with hc machine rm <old name>
 
 runs: hc machine rm <name>
 needs: hc on PATH
 note: the hc machine ls before hc machine rm starts the hc core on this
       host when none runs"
+  local out
+  local -a info
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
   if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
-  _pm_ctr_mounts "$1" >/dev/null || return 1
-  _pm_hc_rm "$1" 1
+  out=$(_pm_ctr_mounts "$1") || return 1
+  mapfile -t info <<<"$out"
+  # the name, not an ID the user gave, names the hc machine
+  _pm_hc_rm "${info[0]}" 1
 }
 
 # ------------------------------------------------------------------ pm doctor
@@ -2091,7 +2112,7 @@ pm_usage() {
     '  start      <container>' \
     '  stop       <container>' \
     '  bash       <container>    interactive bash terminal in a running container' \
-    '  rm         [--force] [--hc-rm] <container>  remove it, its pm network once unused, and its hc machine' \
+    '  rm         [--force] [--hc-rm] <container>  remove it and its pm network once unused; its hc machine while the host core runs, or with --hc-rm' \
     '  ps         [-a] [--agents] | <container> | labels|mounts|ns|id [<container>]' \
     '  net        networks and their containers' \
     '  cp         <container> <local-file> <dest-name>' \
@@ -2246,6 +2267,9 @@ HERDR-CORE
   none runs. pm rm removes the machine named after the container only while
   that core runs, else it gives a skip line; pm rm --hc-rm asks hc anyway.
   pm ps never starts a core and shows HOST-HERDR stopped instead.
+  pm finds a machine by the container's current name, so after
+  podman rename the machine of the old name stays: remove it in the herdr
+  app or with hc machine rm <old name>.
   A machine is pm's only with exactly that connection: one with another,
   also with an absolute podman path, stays as it is: pm run --hc and pm
   hc-add stop with an error, pm rm keeps it with a skip line, pm hc-rm
