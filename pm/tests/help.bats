@@ -12,21 +12,23 @@ setup() {
   PM_VERSION_EXPECTED=${PM_VERSION_EXPECTED#pm }
 }
 
-# the text of readme section $2 in $1: from its heading to the next one
-readme_section() {
-  local s=${1#*$'\n'"$2"$'\n'}
-  printf '%s\n' "${s%%$'\n'[A-Z]*}"
-}
-
 @test "R1: pm run --help has at most 25 lines, the usage line, and every option" {
   run --separate-stderr pm run --help
   expect_status 0
-  (( ${#lines[@]} <= 25 )) || fail "pm run --help has ${#lines[@]} lines"
+  # lines[] drops blank lines, so count the lines of the output itself
+  local -a all
+  mapfile -t all <<<"$output"
+  (( ${#all[@]} <= 25 )) || fail "pm run --help has ${#all[@]} lines"
   [ "${lines[0]}" = 'usage: pm run [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]' ]
   local o
   for o in --cc --cp --hc '--mount <dir>' '--mnt <dir>' '--net <name>' '<image>' '<container-name>'; do
     grep -qE "^  $o +[a-zA-Z<]" <<<"$output" || fail "no option line for $o"
   done
+  # --mount names both mounts, the worktrees one with its target
+  local flat
+  flat=$(tr -s ' \n' '  ' <<<"$output")
+  [[ $flat == *'<dir>/../<foldername>.worktrees at /workspaces/<foldername>.worktrees'* ]] \
+    || fail "the --mount lines lack the worktrees target: $output"
 }
 
 @test "R1: pm run --help ends with a pointer to pm readme" {
@@ -49,15 +51,19 @@ readme_section() {
   local sec s
   sec=$(readme_section "$output" 'NETWORK ISOLATION')
   for s in 'isolate=strict' "pm-script=$PM_VERSION_EXPECTED" 'another driver' \
-    'other than strict' 'e.g. bridge, host, none' 'If podman run fails'; do
+    'other than strict' 'e.g. bridge, host, none' 'If podman run fails' \
+    'any pm-script label'; do
     [[ $sec == *"$s"* ]] || fail "NETWORK ISOLATION lacks: $s"
   done
+  [[ $sec != *'with that label'* ]] || fail 'NETWORK ISOLATION implies a matching label value'
   sec=$(readme_section "$output" 'HERDR-CORE')
   for s in '<devcontainerId>' 'sha256' /home/vscode/.local/state/herdr-core \
     'hc server stop' 'hc server restart' 'hc update' 'exactly' \
     'missing or invalid id file' 'skip line' 'on rollback and on pm rm'; do
     [[ $sec == *"$s"* ]] || fail "HERDR-CORE lacks: $s"
   done
+  # the example and the paths do not hang off the rollback sentence
+  [[ $sec != *'on rollback and on pm rm:'* ]] || fail 'HERDR-CORE: colon after the rollback sentence'
   sec=$(readme_section "$output" 'WHAT PM RUN RUNS')
   for s in "podman network create -o isolate=strict --label pm-script=$PM_VERSION_EXPECTED <network>" \
     'podman run -d --init --userns=keep-id' "sh -c 'exec hc serve >/dev/null 2>&1'" \
@@ -67,5 +73,33 @@ readme_section() {
     'hc machine add --name <container-name>' \
     "--via 'podman exec -i <container-name> sh -c'" 'pm bash <container-name>'; do
     [[ $sec == *"$s"* ]] || fail "WHAT PM RUN RUNS lacks: $s"
+  done
+}
+
+@test "R1: every section the help points to is a readme heading, in readme order" {
+  run --separate-stderr pm run --help
+  expect_status 0
+  # the names after "details in pm readme:", up to the end of the help
+  local ptr=${output#*'details in pm readme:'} name
+  ptr=$(tr -s ' \n' '  ' <<<"$ptr")
+  ptr=${ptr//', and '/,}
+  ptr=${ptr//', '/,}
+  local -a names
+  IFS=, read -r -a names <<<"$ptr"
+  (( ${#names[@]} >= 2 )) || fail "no section names in: $ptr"
+  run pm readme
+  expect_status 0
+  local -a heads
+  mapfile -t heads < <(grep -E '^[A-Z][A-Z -]*[A-Z]$' <<<"$output")
+  local i j last=-1
+  for name in "${names[@]}"; do
+    name=$(sed 's/^ *//; s/ *$//' <<<"$name")
+    j=-1
+    for (( i = 0; i < ${#heads[@]}; i++ )); do
+      [[ ${heads[i]} == "$name" ]] && { j=$i; break; }
+    done
+    (( j >= 0 )) || fail "no readme heading: $name"
+    (( j > last )) || fail "the pointer names $name out of readme order"
+    last=$j
   done
 }

@@ -92,9 +92,10 @@ fs() { printf '%s\n' "$STUB_STATE/fs/pm-proj$1"; }
 @test "run: the readme names the copies in WHAT PM RUN RUNS, and mentions them" {
   run pm readme
   expect_status 0
-  [[ $output == *'with --cc: as pm cp-claude'* && $output == *'with --cp: as pm cp-copilot'* ]] \
-    || fail "readme: $output"
-  expect_status 0
+  local sec
+  sec=$(readme_section "$output" 'WHAT PM RUN RUNS')
+  [[ $sec == *'with --cc: as pm cp-claude'* && $sec == *'with --cp: as pm cp-copilot'* ]] \
+    || fail "WHAT PM RUN RUNS: $sec"
   [[ $output == *'pm run --cc'*'copies'* ]] || fail 'readme lacks the copies'
 }
 

@@ -656,6 +656,8 @@ esac'
   grep -qE '^  --hc +[a-z]' <<<"$output" || fail 'no option line for --hc'
   [[ $output == *'pm readme'* ]] || fail 'no pointer to pm readme'
   [[ $output != *pm-hc* ]] || fail "pm run --help names pm-hc: $output"
+  # decision 4: a bare podman, so no podman path in the help
+  [[ $output != *'podman path'* ]] || fail "pm run --help names a podman path: $output"
   # R1: the herdr-core details and the runs block live in pm readme
   run pm readme
   expect_status 0
@@ -678,8 +680,9 @@ esac'
   [[ $section == *"sh -c 'exec hc serve >/dev/null 2>&1'"* ]] || fail 'runs: lacks the main command'
   [[ $section == *'with --hc: shell = [ "/bin/bash" ] into ~/.config/herdr-core/config.toml'* ]] \
     || fail 'runs: lacks the config'
-  [[ $output != *'-e SHELL'* && $output != *PM_HC_SHELL* && $output != *'another podman path'* ]] \
-    || fail "readme: $output"
+  # decision 4: the runs block uses a bare podman, never a podman path
+  [[ $section != *'podman path'* ]] || fail "runs: names a podman path: $section"
+  [[ $output != *'-e SHELL'* && $output != *PM_HC_SHELL* ]] || fail "readme: $output"
   [[ $section == *'hc machine add --name <container-name>'* ]] || fail 'runs: lacks hc machine add'
   [[ $section == *"--via 'podman exec -i <container-name> sh -c'"* ]] || fail 'runs: lacks the bare podman'
 }

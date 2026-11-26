@@ -302,6 +302,14 @@ has_line() {
   return 1
 }
 
+# readme_section <readme> <heading>: the text of that pm readme section,
+# from the line after its heading up to the next heading (a line that
+# starts with a capital letter)
+readme_section() {
+  local s=${1#*$'\n'"$2"$'\n'}
+  printf '%s\n' "${s%%$'\n'[A-Z]*}"
+}
+
 # is_id <text>: 32 lowercase hex digits
 is_id() { [[ $1 =~ ^[0123456789abcdef]{32}$ ]] || fail "not an id: $1"; }
 
