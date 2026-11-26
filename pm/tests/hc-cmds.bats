@@ -103,6 +103,25 @@ note_missing() {
   has_line "$stderr" "$(note_missing /root/.local/state/herdr-core)"
 }
 
+@test "F2-01: a podman warning on stderr of the HOME lookup does not end up in the home" {
+  fake_container pm-x
+  fake_home pm-x /root
+  STUB_HOME_WARN='WARN[0000] The cgroupv2 manager is set to systemd but there is no systemd user session available' \
+    run --separate-stderr pm hc-add pm-x
+  expect_status 0
+  has_line "$output" 'ok    pm-x:/root/.config/herdr-core/config.toml: shell = [ "/bin/bash" ]'
+  has_line "$output" 'ok    hc machine pm-x added'
+}
+
+@test "F2-01: a failing HOME lookup is an error with podman's stderr, and nothing is added" {
+  fake_container pm-x
+  STUB_HOME_WARN='WARN[0000] a warning' STUB_HOME_RC=125 run --separate-stderr pm hc-add pm-x
+  expect_status 1
+  [[ $stderr == *'error pm-x: cannot read the home of the container user: '*'Error: stub: exec failed'* ]] \
+    || fail "stderr: $stderr"
+  if hc_find machine add; then hc_show; fail 'pm added the machine'; fi
+}
+
 @test "F1-05: only a bind mount counts; a volume or tmpfs at a herdr-core target gets the note" {
   fake_container pm-x '' "vol:/etc/machine-id:volume" "$T/state:$STATE_T"
   run --separate-stderr pm hc-add pm-x

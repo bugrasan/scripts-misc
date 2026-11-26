@@ -260,7 +260,13 @@ case ${1-} in
     # shellcheck disable=SC2016  # pm's literal script, matched as text
     case $* in
       *'printf %s "$HOME"'*)
-        # pm hc-add: $HOME of the container user
+        # pm hc-add: $HOME of the container user; STUB_HOME_WARN adds a
+        # podman warning on stderr, STUB_HOME_RC makes the exec fail
+        [[ -z ${STUB_HOME_WARN-} ]] || printf '%s\n' "$STUB_HOME_WARN" >&2
+        if [[ -n ${STUB_HOME_RC-} ]]; then
+          echo 'Error: stub: exec failed' >&2
+          exit "$STUB_HOME_RC"
+        fi
         if [[ -e $s/home/$ctr ]]; then printf '%s' "$(<"$s/home/$ctr")"; else printf '/home/vscode'; fi
         exit 0 ;;
       *'/.config/herdr-core/config.toml')
