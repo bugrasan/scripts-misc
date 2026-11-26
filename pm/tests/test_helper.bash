@@ -28,7 +28,7 @@ stub_setup() {
   HC=$HOME/.config/herdr-core/container
   P=$T/proj
   mkdir -p "$HOME" "$STUB_BIN" "$FAKE_BIN" "$P"
-  mkdir -p "$STUB_STATE"/{containers,networks,status,mounts,labels,pmscript,create,secrets,cores,nohc,nosha,fs,cbin}
+  mkdir -p "$STUB_STATE"/{containers,networks,status,mounts,labels,ids,home,pmscript,create,secrets,cores,nohc,nosha,fs,cbin}
   # what the fake podman needs to run pm's in-container scripts
   STUB_SH=$(command -v sh) STUB_BASH=$BASH STUB_HASH_TOOL=$PM_TESTS_DIR/stub/hash-tool
   export STUB_SH STUB_BASH STUB_HASH_TOOL
@@ -208,19 +208,26 @@ main_is() {
 
 # fake_container <name> [<pm-hc label> [<mount>...]]: a fake container as
 # podman run leaves it, without a podman call in the log; a mount is
-# <source> or <source>:<target>; pm no longer reads the label (V9-49), so
-# tests pass one only to show that it has no effect
+# <source>, <source>:<target>, or <source>:<target>:<type> (default
+# bind); pm no longer reads the label (V9-49), so tests pass one only to
+# show that it has no effect
 fake_container() {
   printf '\n' >"$STUB_STATE/containers/$1"
   [[ -z ${2-} ]] || printf '%s\n' "$2" >"$STUB_STATE/labels/$1"
   (( $# <= 2 )) || printf '%s\n' "${@:3}" >"$STUB_STATE/mounts/$1"
 }
 
+# fake_id <id> <name>: podman also knows container <name> as <id>
+fake_id() { printf '%s\n' "$2" >"$STUB_STATE/ids/$1"; }
+
+# fake_home <name> <dir>: $HOME of the user of container <name>
+fake_home() { printf '%s\n' "$2" >"$STUB_STATE/home/$1"; }
+
 # forget_containers: drop all fake containers, so that the next pm run on
 # the same folder is no second container
 forget_containers() {
   local d
-  for d in containers status mounts labels pmscript create secrets cores nohc nosha; do
+  for d in containers status mounts labels ids home pmscript create secrets cores nohc nosha; do
     rm -f -- "$STUB_STATE/$d"/*
   done
   # their files go with them

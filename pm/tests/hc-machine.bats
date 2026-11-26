@@ -298,6 +298,48 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   if podman_find rm; then podman_show; fail 'pm ran podman rm'; fi
 }
 
+@test "F1-01: pm rm given a container ID removes the machine named after the container" {
+  host_core_up
+  fake_container pm-x
+  fake_id 0123abcd pm-x
+  FAKE_HC_LS=$(machines "$(hc_machine pm-x "$(pm_via pm-x)")")
+  export FAKE_HC_LS
+  run --separate-stderr pm rm --force 0123abcd
+  expect_status 0
+  hc_find -x machine rm -- pm-x || { hc_show; fail 'no hc machine rm pm-x'; }
+  has_line "$output" 'ok    hc machine pm-x removed'
+  # without a running host core, the skip line names the machine too
+  forget_containers
+  fake ps 'true'
+  fake_container pm-x
+  fake_id 0123abcd pm-x
+  run --separate-stderr pm rm --force 0123abcd
+  expect_status 0
+  has_line "$output" 'skip  hc machine pm-x: hc core on this host not running; not checked'
+}
+
+@test "F1-06: pm rm --hc-rm on a missing container says so, also without hc on PATH" {
+  run --separate-stderr pm rm --hc-rm nope
+  expect_status 1
+  has_line "$stderr" 'error container nope: Error: no such container nope'
+  [ ! -s "$HC_LOG" ] || { hc_show; fail 'hc was called'; }
+  rm -- "$STUB_BIN/hc"
+  use_min_path
+  run --separate-stderr pm rm --hc-rm nope
+  expect_status 1
+  has_line "$stderr" 'error container nope: Error: no such container nope'
+}
+
+@test "F1-12: pm rm --hc-rm with a failing hc machine ls: exit 1, a by-hand hint, and the container is gone" {
+  fake_container pm-x
+  FAKE_HC_LS_RC=1 FAKE_HC_LS='{"error":{"kind":"unavailable"}}' \
+    run --separate-stderr pm rm --hc-rm --force pm-x
+  expect_status 1
+  has_line "$output" 'ok    container pm-x removed'
+  has_line "$stderr" 'error hc machine pm-x: {"error":{"kind":"unavailable"}}; remove it by hand with: hc machine rm pm-x'
+  [[ ! -e $STUB_STATE/containers/pm-x ]]
+}
+
 @test "V9-53: a repeated --hc-rm is harmless, as a repeated --force" {
   fake_container pm-x
   run --separate-stderr pm rm --hc-rm --force --hc-rm --force pm-x
@@ -308,7 +350,7 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
 
 # ------------------------------------------------------------------ Q24
 
-@test "Q24: pm start runs podman start only, also for a pm-hc container" {
+@test "Q24: pm start runs podman start only, also for a --hc container" {
   fake_container pm-x pm-x
   printf 'exited\n' >"$STUB_STATE/status/pm-x"
   run --separate-stderr pm start pm-x
@@ -325,7 +367,7 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   run pm help
   expect_status 0
   has_line "$output" '  start      <container>'
-  has_line "$output" '  rm         [--force] [--hc-rm] <container>  remove it, its pm network once unused, and its hc machine'
+  has_line "$output" '  rm         [--force] [--hc-rm] <container>  remove it and its pm network once unused; its hc machine while the host core runs, or with --hc-rm'
   run pm start --help
   expect_status 0
   [[ $output == *'podman start <container>'* && $output == *'hc serve'* ]] \
@@ -335,4 +377,7 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   [[ $output == 'usage: pm rm [--force] [--hc-rm] <container>'* ]] || fail "pm rm --help: $output"
   [[ $output == *'hc machine rm <container>'* && $output == *--hc-rm* && $output != *pm-hc* ]] \
     || fail "pm rm --help: $output"
+  # F1-02: a renamed container leaves its old machine behind
+  [[ $output == *'podman rename'* && $output == *'hc machine rm <old name>'* ]] \
+    || fail "pm rm --help lacks the rename note: $output"
 }

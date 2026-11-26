@@ -343,8 +343,53 @@ core_shell() {
   expect_status 0
   [[ $output == Linux* ]] || fail "uname after pm start: $output"
 
-  # pm rm --force removes the container and its machine
+  # pm rm --force --hc-rm removes the container and its machine; --hc-rm
+  # asks hc whether or not pm sees a host core (V9-53), so the outcome does
+  # not depend on how the host core shows up in ps
+  run --separate-stderr pm rm --force --hc-rm "$CTR"
+  expect_status 0
+  has_line "$output" "ok    hc machine $CTR removed"
+  [ -z "$(host_machine "$CTR")" ] || fail "machine left: $(hc machine ls --json)"
+}
+
+# host_core_gone: stop the isolated host core and wait up to 30 s until
+# pm's own process check sees no host core
+host_core_gone() {
+  local i
+  hc server stop >/dev/null 2>&1 || true
+  for (( i = 0; i < 60; i++ )); do
+    pm_internal _pm_host_core_running || return 0
+    sleep 0.5
+  done
+  fail 'the host core still runs after hc server stop'
+}
+
+@test "F1-07: pm rm without a running host core gives a skip line and starts none; pm rm --hc-rm removes the machine" {
+  use_host_hc
+  # pm sees every hc core of this user; another one makes this test moot
+  if pm_internal _pm_host_core_running; then skip 'an hc core of this user already runs on this host'; fi
+  run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
+  expect_status 0
+  has_line "$output" "ok    hc machine $CTR added"
+  host_core_gone
+
+  # V9-52: no host core, so pm rm asks hc nothing and starts no core
   run --separate-stderr pm rm --force "$CTR"
+  expect_status 0
+  has_line "$output" "ok    container $CTR removed"
+  has_line "$output" "skip  hc machine $CTR: hc core on this host not running; not checked"
+  [ ! -S "$HC_SOCKET" ] || fail 'pm rm started a host core'
+  # the machine stays (listing it starts the core again)
+  [ "$(host_machine "$CTR")" = "podman exec -i $CTR sh -c True" ] \
+    || fail "machine: $(hc machine ls --json)"
+
+  # V9-53: a new container of that name keeps the machine; with the host
+  # core stopped again, pm rm --hc-rm still removes it
+  run --separate-stderr pm run --hc --mount "$DIR" "$IMG"
+  expect_status 0
+  has_line "$stderr" "pm run: note: hc machine $CTR already connects to this container; kept"
+  host_core_gone
+  run --separate-stderr pm rm --force --hc-rm "$CTR"
   expect_status 0
   has_line "$output" "ok    hc machine $CTR removed"
   [ -z "$(host_machine "$CTR")" ] || fail "machine left: $(hc machine ls --json)"

@@ -6,8 +6,13 @@
 # state below $STUB_STATE, per fake container <name> (names double as IDs):
 #   containers/<name>  its network (one line, empty for podman's default)
 #   status/<name>      its state (default: $STUB_STATUS, else running)
-#   mounts/<name>      one bind mount per line, as <source>:<target>
-#   labels/<name>      the value of its pm-hc label
+#   mounts/<name>      one mount per line, as <source>:<target>[:<type>];
+#                      the type defaults to bind
+#   ids/<id>           the name of the container with this extra ID; pm
+#                      may name a container by either
+#   home/<name>        $HOME of its user (default /home/vscode)
+#   labels/<name>      a pm-hc label of an earlier v9 build; pm must never
+#                      read one (V9-49), so a format that asks for it fails
 #   pmscript/<name>    the value of its pm-script label
 #   create/<name>      its podman run arguments, each ended by a NUL
 #   secrets/<name>     its mount secrets, one name per line
@@ -48,6 +53,13 @@ s=${STUB_STATE:?}
 c=$s/containers n=$s/networks
 last=${!#}   # pm passes the container or network last, after --
 us=$'\x1f' rs=$'\x1e'
+# a container named by an extra ID stands for its name from here on
+[[ -e $c/$last || ! -e $s/ids/$last ]] || last=$(<"$s/ids/$last")
+# pm no longer reads the pm-hc label (V9-49): fail loudly if it does
+if [[ $* == *'"pm-hc"'* || $* == *label=pm-hc* ]]; then
+  echo 'stub: pm asked podman for the pm-hc label' >&2
+  exit 99
+fi
 
 # status <name>: the state of a fake container
 status() { if [[ -e $s/status/$1 ]]; then cat -- "$s/status/$1"; else printf '%s\n' "${STUB_STATUS:-running}"; fi; }
@@ -75,8 +87,16 @@ hcmain() {
   [[ ! -e $s/create/$1 ]] || mapfile -t -d '' a <"$s/create/$1"
   (( ${#a[@]} )) && [[ ${a[${#a[@]}-1]} == *'hc serve'* ]]
 }
-# jlabel <name>: its pm-hc label as podman's json prints it
-jlabel() { printf '"%s"' "$(val labels "$1")"; }
+# mounts <name>: its mounts, one per line, as <type><RS><source><RS><target>
+mounts() {
+  local m src rest
+  [[ -e $s/mounts/$1 ]] || return 0
+  while IFS= read -r m; do
+    src=${m%%:*} rest=${m#*:}
+    if [[ $rest == *:* ]]; then printf '%s%s%s%s%s\n' "${rest#*:}" "$rs" "$src" "$rs" "${rest%%:*}"
+    else printf 'bind%s%s%s%s\n' "$rs" "$src" "$rs" "$rest"; fi
+  done <"$s/mounts/$1"
+}
 # jcreate <name>: its create command as podman's json prints it
 jcreate() {
   local -a a=()
@@ -100,29 +120,22 @@ case ${1-} in
         fmt=$4
         # the formats of pm ps and the mount scan of pm run inspect all
         # given containers at once; fields as pm asks
-        if [[ $fmt == *NetworkMode* || $fmt == '{{.Name}}'*.Mounts* ]]; then
+        if [[ $fmt == *NetworkMode* || $fmt == *'{{.Source}}'* ]]; then
           for id in "${@:5}"; do
             [[ -e $c/$id ]] || continue
             net=$(val containers "$id") ms='' secs=''
             if [[ $fmt == *NetworkMode* ]]; then
               # pm ps: id, name, status, pm-script, devcontainer folder,
-              # target=source mounts, networks, network mode, the pm-hc
-              # label as json only when asked (pm before V9-49), create
+              # target=source mounts, networks, network mode, create
               # command as json, mount secrets
-              if [[ -e $s/mounts/$id ]]; then
-                while IFS= read -r m; do ms+="${m#*:}=${m%%:*};"; done <"$s/mounts/$id"
-              fi
+              while IFS=$rs read -r _ src dst; do ms+="$dst=$src;"; done < <(mounts "$id")
               if [[ -e $s/secrets/$id ]]; then
                 while IFS= read -r m; do secs+=$m$rs; done <"$s/secrets/$id"
               fi
-              hcl=''
-              [[ $fmt != *pm-hc* ]] || hcl=$(jlabel "$id")$us
-              printf '%s\n' "$id$us$id$us$(status "$id")$us$(val pmscript "$id")$us$us$ms$us${net:+$net,}$us${net:+bridge}${net:-pasta}$us$hcl$(jcreate "$id")$us$secs"
+              printf '%s\n' "$id$us$id$us$(status "$id")$us$(val pmscript "$id")$us$us$ms$us${net:+$net,}$us${net:+bridge}${net:-pasta}$us$(jcreate "$id")$us$secs"
             else
-              # pm run: names and bind-mount sources
-              if [[ -e $s/mounts/$id ]]; then
-                while IFS= read -r m; do ms+=${m%%:*}$rs; done <"$s/mounts/$id"
-              fi
+              # pm run: names and mount sources
+              while IFS=$rs read -r _ src _; do ms+=$src$rs; done < <(mounts "$id")
               printf '%s\n' "$id$us$ms"
             fi
           done
@@ -133,24 +146,17 @@ case ${1-} in
           exit 125
         fi
         case $fmt in
-          # pm rm: the state, the pm-hc label as json, then one network per
-          # line
-          *NetworkSettings*)
+          # pm rm: the name and the state, then one network per line
+          '{{.Name}}'*NetworkSettings*)
+            printf '%s\n' "$last"
             status "$last"
-            [[ $fmt != *pm-hc* ]] || printf '%s\n' "$(jlabel "$last")"
             printf '%s\n' "$(val containers "$last")" ;;
-          # pm hc-add: the state, then each mount target after a unit
-          # separator
-          '{{.State.Status}}'*.Mounts*)
+          # pm hc-add, pm hc-rm: the name and the state, then each mount as
+          # <type><RS><target>, all after unit separators
+          '{{.Name}}'*.Mounts*)
             ms=''
-            if [[ -e $s/mounts/$last ]]; then
-              while IFS= read -r m; do ms+=$us${m#*:}; done <"$s/mounts/$last"
-            fi
-            printf '%s\n' "$(status "$last")$ms" ;;
-          # pm hc-add: the pm-hc label as json and the state
-          *pm-hc*State.Status*) printf '%s\n' "$(jlabel "$last")$us$(status "$last")" ;;
-          # pm start, pm hc-rm: the pm-hc label as json
-          *pm-hc*) printf '%s\n' "$(jlabel "$last")" ;;
+            while IFS=$rs read -r t _ dst; do ms+=$us$t$rs$dst; done < <(mounts "$last")
+            printf '%s\n' "$last$us$(status "$last")$ms" ;;
           # pm run, when a container already mounts the folder
           '{{.State.Status}}') status "$last" ;;
           *State.Running*)
@@ -181,25 +187,22 @@ case ${1-} in
       ls) [[ -z ${STUB_NETWORKS-} ]] || printf '%s\n' "$STUB_NETWORKS"; exit 0 ;;
     esac ;;
   run)
-    # remember the container, its network, mounts, labels, and arguments
-    args=("$@") name='' net='' label='' script='' vols=()
+    # remember the container, its network, mounts, pm-script label, and
+    # arguments
+    args=("$@") name='' net='' script='' vols=()
     for (( i = 1; i < ${#args[@]} - 1; i++ )); do
       case ${args[i]} in
         --name)    name=${args[i+1]} ;;
         --network) net=${args[i+1]} ;;
         -v)        vols+=("${args[i+1]%:ro}") ;;
         --label)
-          case ${args[i+1]} in
-            pm-hc=*)     label=${args[i+1]#pm-hc=} ;;
-            pm-script=*) script=${args[i+1]#pm-script=} ;;
-          esac ;;
+          [[ ${args[i+1]} != pm-script=* ]] || script=${args[i+1]#pm-script=} ;;
       esac
     done
     if [[ -n $name ]]; then
       printf '%s\n' "$net" >"$c/$name"
       printf '%s\0' podman "${args[@]}" >"$s/create/$name"
       (( ${#vols[@]} == 0 )) || printf '%s\n' "${vols[@]}" >"$s/mounts/$name"
-      [[ -z $label ]] || printf '%s\n' "$label" >"$s/labels/$name"
       [[ -z $script ]] || printf '%s\n' "$script" >"$s/pmscript/$name"
     fi
     if [[ ${STUB_RUN_RC:-0} != 0 ]]; then
@@ -248,15 +251,20 @@ case ${1-} in
     for (( i = 1; i < ${#args[@]}; i++ )); do
       if [[ ${args[i]} == -- ]]; then ctr=${args[i+1]}; break; fi
     done
+    [[ -e $c/$ctr || ! -e $s/ids/$ctr ]] || ctr=$(<"$s/ids/$ctr")
     # as podman 6.2: no exec into a container that does not run
     if [[ $(status "$ctr") != running ]]; then
       echo 'Error: can only create exec sessions on running containers: container state improper' >&2
       exit 255
     fi
     case $* in
-      *' /home/vscode/.config/herdr-core/config.toml')
-        # pm run --hc: pm's own script writes the config into the fake
-        # files of the container, from stdin
+      *'printf %s "$HOME"'*)
+        # pm hc-add: $HOME of the container user
+        if [[ -e $s/home/$ctr ]]; then printf '%s' "$(<"$s/home/$ctr")"; else printf '/home/vscode'; fi
+        exit 0 ;;
+      *'/.config/herdr-core/config.toml')
+        # pm run --hc, pm hc-add: pm's own script writes the config into
+        # the fake files of the container, from stdin
         if [[ -n ${STUB_HCCONF_RC-} ]]; then
           echo 'Error: stub: write failed' >&2
           exit "$STUB_HCCONF_RC"
@@ -309,7 +317,7 @@ case ${1-} in
     cp -- "$src" "$s/fs/$ctr$path"
     exit 0 ;;
   rm)
-    for d in containers status mounts labels pmscript create cores nohc nosha; do rm -f -- "$s/$d/$last"; done
+    for d in containers status mounts labels home pmscript create cores nohc nosha; do rm -f -- "$s/$d/$last"; done
     # its files go with it
     rm -rf -- "${s:?}/fs/$last" "${s:?}/cbin/$last"
     printf '%s\n' "$last"

@@ -17,6 +17,7 @@ CASES=("pm run -" "pm run --hc -" "pm.sh run --mount x --hc img --"
   "pm run --cc --hc --net n1 --h" "pm run --hc ''" "pm run --hc --mount x ''"
   "pm rm -" "pm rm ''" "pm rm pm-x -" "pm.sh rm --force ''" "pm rm -f ''"
   "pm rm --hc-rm -" "pm rm --force pm-x --hc-rm -" "pm rm --hc-rm --force ''" "pm rm pm-x --hc-rm ''"
+  "pm rm --help -" "pm rm --help ''"
   "pm ''" "pm hc-add ''" "pm hc-rm -" "pm doctor ''" "pm ps -" "pm ps -a -" "pm ps --agents -")
 
 # candidates: the candidates in $output (after the kind line), sorted, on
@@ -44,6 +45,13 @@ rm_completion() {
   run --separate-stderr "$1" pm rm pm-x --hc-rm ''
   expect_status 0
   [ "$(candidates)" = '' ] || fail "pm rm pm-x --hc-rm: $(candidates)"
+  # F1-12: nothing follows --help
+  run --separate-stderr "$1" pm rm --help -
+  expect_status 0
+  [ "$(candidates)" = '' ] || fail "pm rm --help -: $(candidates)"
+  run --separate-stderr "$1" pm rm --help ''
+  expect_status 0
+  [ "$(candidates)" = '' ] || fail "pm rm --help: $(candidates)"
   run --separate-stderr "$1" pm rm --force ''
   expect_status 0
   [ "$(candidates)" = 'pm-x ' ] || fail "pm rm --force: $(candidates)"

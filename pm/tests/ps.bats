@@ -100,6 +100,8 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   run --separate-stderr pm ps
   expect_status 0
   [ "$(ps_cell HOST-HERDR "$(ps_row pm-a)")" = yes ]
+  # one inspect call for the table, and it asks for no pm-hc label
+  [ "$(grep -c '^container inspect ' "$PODMAN_LOG")" -eq 1 ] || { podman_show; fail 'not exactly one container inspect'; }
   podman_find container inspect || { podman_show; fail 'no inspect'; }
   [[ " ${CALL[*]} " != *pm-hc* ]] || fail "pm ps reads the pm-hc label: ${CALL[*]}"
 }

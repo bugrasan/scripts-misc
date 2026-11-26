@@ -23,7 +23,7 @@ only_call() {
   fail "not just: podman $*"
 }
 
-@test "pm stop: plain podman stop, also for a running pm-hc container, whatever its state" {
+@test "pm stop: plain podman stop, also for a running --hc container, whatever its state" {
   local c
   fake_container pm-x pm-x
   fake_container pm-y pm-y

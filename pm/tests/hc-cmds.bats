@@ -74,6 +74,47 @@ note_missing() {
   has_line "$stderr" "$(note_missing /etc/machine-id)"
 }
 
+@test "F1-01: hc-add given a container ID names the machine and the config line after the container" {
+  fake_container pm-x
+  fake_id 0123abcd pm-x
+  run --separate-stderr pm hc-add 0123abcd
+  expect_status 0
+  hc_find -x machine add --name pm-x --via 'podman exec -i pm-x sh -c' || { hc_show; fail 'no machine pm-x'; }
+  has_line "$output" "ok    pm-x:$CONF: shell = [ \"/bin/bash\" ]"
+  has_line "$output" 'ok    hc machine pm-x added'
+  has_line "$stderr" "$(note_missing "/etc/machine-id and $STATE_T")"
+  [[ $output$stderr != *0123abcd* ]] || fail "the ID names the machine: $output $stderr"
+}
+
+@test "F1-04: hc-add uses the container user's HOME for config.toml and the state mount" {
+  fake_container pm-x '' "$T/id:/etc/machine-id" "$T/state:/root/.local/state/herdr-core"
+  fake_home pm-x /root
+  run --separate-stderr pm hc-add pm-x
+  expect_status 0
+  has_line "$output" 'ok    pm-x:/root/.config/herdr-core/config.toml: shell = [ "/bin/bash" ]'
+  [ "$(<"$STUB_STATE/fs/pm-x/root/.config/herdr-core/config.toml")" = 'shell = [ "/bin/bash" ]' ]
+  [[ $stderr != *'does not mount'* ]] || fail "stderr: $stderr"
+  # the state folder of /home/vscode does not count for a /root user
+  forget_containers
+  fake_container pm-x '' "$T/id:/etc/machine-id" "$T/state:$STATE_T"
+  fake_home pm-x /root
+  run --separate-stderr pm hc-add pm-x
+  expect_status 0
+  has_line "$stderr" "$(note_missing /root/.local/state/herdr-core)"
+}
+
+@test "F1-05: only a bind mount counts; a volume or tmpfs at a herdr-core target gets the note" {
+  fake_container pm-x '' "vol:/etc/machine-id:volume" "$T/state:$STATE_T"
+  run --separate-stderr pm hc-add pm-x
+  expect_status 0
+  has_line "$stderr" "$(note_missing /etc/machine-id)"
+  forget_containers
+  fake_container pm-x '' "$T/id:/etc/machine-id" "tmpfs:$STATE_T:tmpfs"
+  run --separate-stderr pm hc-add pm-x
+  expect_status 0
+  has_line "$stderr" "$(note_missing "$STATE_T")"
+}
+
 @test "V9-50: hc-add ignores a pm-hc label from an earlier v9 build" {
   fake_container pm-x other
   run --separate-stderr pm hc-add pm-x
@@ -153,6 +194,17 @@ note_missing() {
   [[ -e $STUB_STATE/containers/pm-x ]]
 }
 
+@test "F1-01: hc-rm given a container ID removes the machine named after the container" {
+  fake_container pm-x
+  fake_id 0123abcd pm-x
+  FAKE_HC_LS=$(machines "$(hc_machine pm-x "$(pm_via pm-x)")")
+  export FAKE_HC_LS
+  run --separate-stderr pm hc-rm 0123abcd
+  expect_status 0
+  hc_find -x machine rm -- pm-x || { hc_show; fail 'no hc machine rm pm-x'; }
+  [ "$output" = 'ok    hc machine pm-x removed' ] || fail "output: $output"
+}
+
 @test "hc-rm: a machine that is gone is a skip line, exit 0; a stopped container is fine" {
   fake_container pm-x
   printf 'exited\n' >"$STUB_STATE/status/pm-x"
@@ -211,6 +263,9 @@ note_missing() {
   run pm hc-rm --help
   expect_status 0
   [[ $output == *'exactly podman exec -i <name> sh -c'* ]] || fail "pm hc-rm --help: $output"
+  # F1-02: a renamed container leaves its old machine behind
+  [[ $output == *'podman rename'* && $output == *'hc machine rm <old name>'* ]] \
+    || fail "pm hc-rm --help lacks the rename note: $output"
   [[ $output != *pm-hc* && $output != *label* && $output != *'podman path'* ]] \
     || fail "pm hc-rm --help: $output"
 }

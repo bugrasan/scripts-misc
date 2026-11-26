@@ -704,7 +704,7 @@ esac'
     'absolute podman path' \
     'only one core runs per state folder' .devcontainer/devcontainer.json \
     '.devcontainer/<name>/devcontainer.json' 'hc exec --on' 'pm hc-add' \
-    'pm hc-rm' 'pm rm --hc-rm' 'pm start' 'pm rm'; do
+    'pm hc-rm' 'pm rm --hc-rm' 'pm start' 'pm rm' 'podman rename' 'hc machine rm <old name>'; do
     [[ $section == *"$s"* ]] || fail "the HERDR-CORE section lacks: $s"
   done
   # V9-49: no pm-hc label in the readme
