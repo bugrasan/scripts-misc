@@ -14,6 +14,7 @@ if [ "$1" != -fsLS ] || [ "$2" != get.chezmoi.io/lb ]; then
   exit 22
 fi
 # builtins only: the script's PATH has nothing but sh and this curl
+# shellcheck disable=SC2016  # the installer's own text, expanded where it runs
 printf '%s\n' \
   'printf "%s\n" "$@" >"$HOME/installer-args"' \
   'pwd >"$HOME/installer-pwd"' \

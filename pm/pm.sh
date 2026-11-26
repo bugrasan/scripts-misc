@@ -452,7 +452,7 @@ pm_run() {
                     secret, and copy the instructions, settings, and
                     config as pm cp-copilot
   --cm              apply PM_CHEZMOI_REPO first, as pm cm
-  --hc             run the herdr-core core, hc serve, as the container's
+  --hc              run the herdr-core core, hc serve, as the container's
                     main command, with a stable identity, and add the
                     container to hc here as a machine; needs --mount
   --mount <dir>     mount <dir> at /workspaces/<foldername>, and
@@ -1546,19 +1546,30 @@ sources: PM_CLAUDE_MD, PM_COPILOT_SETTINGS, and PM_COPILOT_CONFIG"
 
 # apply PM_CHEZMOI_REPO in running container $1 with a chezmoi one-shot;
 # curl runs in the container, from the home, as the lb installer writes
-# ./.local/bin; the repo is an argument, never script text; podman's and
-# chezmoi's output show only on failure
+# ./.local/bin; s= keeps curl's exit status, which sh -c "$(curl ...)"
+# loses; the repo is an argument after --, never script text or an option
 _pm_chezmoi() {
-  local out
-  # shellcheck disable=SC2016  # $HOME and $1 expand in the container's sh
-  if out=$(podman exec -- "$1" sh -c \
-    'cd "$HOME" && sh -c "$(curl -fsLS get.chezmoi.io/lb)" -- init --one-shot --apply "$1"' \
-    sh "$PM_CHEZMOI_REPO" 2>&1); then
+  local out rc=0 l from
+  local -a ls
+  # shellcheck disable=SC2016  # $HOME, $s, and $1 expand in the container
+  out=$(podman exec -- "$1" sh -c \
+    'cd "$HOME" && s=$(curl -fsLS get.chezmoi.io/lb) && sh -c "$s" -- init --one-shot --apply -- "$1"' \
+    sh "$PM_CHEZMOI_REPO" 2>&1) || rc=$?
+  if (( rc == 0 )); then
     _pm_ok "chezmoi $PM_CHEZMOI_REPO applied in $1"
-  else
-    _pm_err "$1: chezmoi $PM_CHEZMOI_REPO: ${out//$'\n'/ }"
+    return 0
+  fi
+  # the output only on failure: its last 20 lines, indented under the error
+  if [[ -z $out ]]; then
+    _pm_err "$1: chezmoi $PM_CHEZMOI_REPO failed with exit $rc"
     return 1
   fi
+  _pm_err "$1: chezmoi $PM_CHEZMOI_REPO failed with exit $rc; its last output:"
+  mapfile -t ls <<<"$out"
+  # a negative offset past the start gives nothing, so count from the front
+  from=$(( ${#ls[@]} > 20 ? ${#ls[@]} - 20 : 0 ))
+  for l in "${ls[@]:from}"; do printf '      %s\n' "$l" >&2; done
+  return 1
 }
 
 pm_cm() {
@@ -1573,7 +1584,7 @@ afterwards
                running containers
 
 runs: podman exec <name> sh -c 'cd \"\$HOME\" &&
-        sh -c \"\$(curl -fsLS get.chezmoi.io/lb)\" -- init --one-shot --apply <repo>'
+        s=\$(curl -fsLS get.chezmoi.io/lb) && sh -c \"\$s\" -- init --one-shot --apply -- \"\$1\"' sh <repo>
 needs: sh and curl in the container, and the internet"
   local out name state
   local -a info
@@ -2313,7 +2324,9 @@ CHEZMOI
 
   pm run --cm and pm cm <container> apply a dotfiles repo with a chezmoi
   one-shot, inside the container, as its user, from its home:
-    sh -c "\$(curl -fsLS get.chezmoi.io/lb)" -- init --one-shot --apply <repo>
+    podman exec <name> sh -c 'cd "\$HOME" &&
+      s=\$(curl -fsLS get.chezmoi.io/lb) && sh -c "\$s" -- init --one-shot --apply -- "\$1"' sh <repo>
+  The repo is an argument, never script text; a failing curl fails the step.
   The lb installer puts chezmoi into ~/.local/bin; --one-shot implies
   --apply and --force, so chezmoi may overwrite existing files, and it
   removes chezmoi and its source state afterwards.
@@ -2324,8 +2337,8 @@ CHEZMOI
   pm writes herdr-core's config.toml (--hc) only when the dotfiles brought
   none.
   The container needs sh and curl, and the internet; a failure is a red
-  error with the output of curl or chezmoi, exit 1, and the container
-  stays.
+  error with the exit status and the last 20 lines of the output of curl
+  or chezmoi, exit 1, and the container stays.
 
 INSPECT
 
