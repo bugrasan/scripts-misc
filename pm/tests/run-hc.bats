@@ -690,7 +690,7 @@ esac'
 @test "H3: pm help lists --hc in the run line" {
   run pm help
   expect_status 0
-  has_line "$output" '  run        [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]'
+  has_line "$output" '  run        [--cc] [--cp] [--cm] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]'
 }
 
 @test "H4: pm readme has a HERDR-CORE section" {

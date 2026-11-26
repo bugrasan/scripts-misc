@@ -38,6 +38,11 @@ unset CDPATH
 : "${PM_COPILOT_SETTINGS:=$HOME/.copilot/settings.json.template}"
 : "${PM_COPILOT_CONFIG:=$HOME/.copilot/config.json.template}"
 
+# Dotfiles repo that `pm run --cm` and `pm cm` apply with a chezmoi one-shot;
+# the readme names the default as well.
+_pm_chezmoi_default=codeberg.org/bugrasan/dotfiles
+: "${PM_CHEZMOI_REPO:=$_pm_chezmoi_default}"
+
 # ------------------------------------------------------------------ helpers
 
 # print a usage block to stderr; callers return 2 afterwards
@@ -438,15 +443,16 @@ _pm_folder_hint() {
 # ------------------------------------------------------------------ pm run
 
 pm_run() {
-  local cc=0 cp=0 hc=0 mnt='' net='' image='' name='' npos=0 endflags=0
-  local help="usage: pm run [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]
+  local cc=0 cp=0 cm=0 hc=0 mnt='' net='' image='' name='' npos=0 endflags=0
+  local help="usage: pm run [--cc] [--cp] [--cm] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]
 
   --cc              pass the Claude Code token (pm secret-cc) as a podman
                     secret, and copy CLAUDE.md and settings as pm cp-claude
   --cp              pass the GitHub Copilot token (pm secret-cp) as a podman
                     secret, and copy the instructions, settings, and
                     config as pm cp-copilot
-  --hc              run the herdr-core core, hc serve, as the container's
+  --cm              apply PM_CHEZMOI_REPO first, as pm cm
+  --hc             run the herdr-core core, hc serve, as the container's
                     main command, with a stable identity, and add the
                     container to hc here as a machine; needs --mount
   --mount <dir>     mount <dir> at /workspaces/<foldername>, and
@@ -479,6 +485,7 @@ HERDR-CORE, and WHAT PM RUN RUNS"
       case $1 in
         --cc)  cc=1; shift; continue ;;
         --cp)  cp=1; shift; continue ;;
+        --cm)  cm=1; shift; continue ;;
         --hc)  hc=1; shift; continue ;;
         --mount|--mnt|--mount=*|--mnt=*)
           if [[ -n $mnt ]]; then _pm_usage "pm run: --mount given twice"$'\n\n'"$help"; return 2; fi
@@ -651,11 +658,12 @@ HERDR-CORE, and WHAT PM RUN RUNS"
   fi
   trap - INT
 
-  # the agent files as pm cp-claude and pm cp-copilot copy them, then the
-  # core's shell in herdr-core's config, which the running core reads for
-  # each new shell, and the hc machine on this host; a failed step still
-  # lets the later ones run, and the container stays on any failure
+  # the dotfiles first, so the explicit copies below win over them (D13);
+  # then the agent files as pm cp-claude and pm cp-copilot copy them, the
+  # core's shell in herdr-core's config, and the hc machine on this host;
+  # a failed step still lets the later ones run; the container stays
   local rc=0
+  if (( cm )); then _pm_chezmoi "$name" || rc=1; fi
   if (( cc )); then _pm_put_claude "$name" || rc=1; fi
   if (( cp )); then _pm_put_copilot "$name" || rc=1; fi
   if (( hc )); then
@@ -1534,6 +1542,54 @@ sources: PM_CLAUDE_MD, PM_COPILOT_SETTINGS, and PM_COPILOT_CONFIG"
   _pm_put_copilot "$1"
 }
 
+# ------------------------------------------------------------------ pm cm
+
+# apply PM_CHEZMOI_REPO in running container $1 with a chezmoi one-shot;
+# curl runs in the container, from the home, as the lb installer writes
+# ./.local/bin; the repo is an argument, never script text; podman's and
+# chezmoi's output show only on failure
+_pm_chezmoi() {
+  local out
+  # shellcheck disable=SC2016  # $HOME and $1 expand in the container's sh
+  if out=$(podman exec -- "$1" sh -c \
+    'cd "$HOME" && sh -c "$(curl -fsLS get.chezmoi.io/lb)" -- init --one-shot --apply "$1"' \
+    sh "$PM_CHEZMOI_REPO" 2>&1); then
+    _pm_ok "chezmoi $PM_CHEZMOI_REPO applied in $1"
+  else
+    _pm_err "$1: chezmoi $PM_CHEZMOI_REPO: ${out//$'\n'/ }"
+    return 1
+  fi
+}
+
+pm_cm() {
+  local help="usage: pm cm <container>
+
+applies the dotfiles repo PM_CHEZMOI_REPO ($PM_CHEZMOI_REPO) in a running
+container with a chezmoi one-shot, as pm run --cm does; --one-shot implies
+--apply and --force, so it overwrites existing files, and removes chezmoi
+afterwards
+
+  <container>  running container, by name or ID; completion lists the
+               running containers
+
+runs: podman exec <name> sh -c 'cd \"\$HOME\" &&
+        sh -c \"\$(curl -fsLS get.chezmoi.io/lb)\" -- init --one-shot --apply <repo>'
+needs: sh and curl in the container, and the internet"
+  local out name state
+  local -a info
+  _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
+  if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
+  out=$(_pm_ctr_mounts "$1") || return 1
+  mapfile -t info <<<"$out"
+  # the name, not an ID the user gave, goes into the messages
+  name=${info[0]} state=${info[1]-}
+  if [[ $state != running ]]; then
+    _pm_err "container $name is $state; start it with: pm start $name"
+    return 1
+  fi
+  _pm_chezmoi "$name"
+}
+
 # ------------------------------------------------------ pm secret-cc / secret-cp
 
 # prompt for a token without echo and store it as a podman secret
@@ -1626,7 +1682,7 @@ _pm_candidates_run() {
   # --mount and --mnt are one flag
   if [[ $cur == -* ]]; then
     _pm_kind=words
-    for f in --cc --cp --hc --mount --mnt --net --help; do
+    for f in --cc --cp --cm --hc --mount --mnt --net --help; do
       for (( i = 2; i < n - 1; i++ )); do
         w=${_pm_words[i]%%=*}
         [[ $w == "$f" ]] && continue 2
@@ -1691,7 +1747,7 @@ _pm_candidates() {
       _pm_reply=(-h --help --version)
     else
       _pm_reply=(run start stop bash rm ps net cp cp-claude cp-cc cp-copilot cp-cp
-        secret-cc secret-cp hc-add hc-rm doctor readme sh zsh sh-file zsh-file help)
+        secret-cc secret-cp cm hc-add hc-rm doctor readme sh zsh sh-file zsh-file help)
     fi
     return 0
   fi
@@ -1737,8 +1793,8 @@ _pm_candidates() {
     # the container and cannot be completed from the host
     cp)    if (( arg == 1 )); then _pm_list_containers --all
            elif (( arg == 2 )); then _pm_kind=files; fi ;;
-    # these run mkdir in the container, so it must be running
-    cp-claude|cp-cc|cp-copilot|cp-cp)
+    # these run mkdir or chezmoi in the container, so it must be running
+    cp-claude|cp-cc|cp-copilot|cp-cp|cm)
            (( arg == 1 )) && _pm_list_containers --filter status=running ;;
     # any container (V9-50, V9-51); hc-add needs a running one
     hc-add) (( arg == 1 )) && _pm_list_containers --filter status=running ;;
@@ -1812,7 +1868,7 @@ _pm_candidates_run() {
   # --mount and --mnt are one flag
   if [[ $cur == -* ]]; then
     REPLY=words
-    for f in --cc --cp --hc --mount --mnt --net --help; do
+    for f in --cc --cp --cm --hc --mount --mnt --net --help; do
       (( ${before[(Ie)$f]} )) && continue
       [[ $f == --m*t ]] && (( ${before[(Ie)--mount]} || ${before[(Ie)--mnt]} )) && continue
       reply+=( $f )
@@ -1874,7 +1930,7 @@ _pm_candidates() {
       reply=( -h --help --version )
     else
       reply=( run start stop bash rm ps net cp cp-claude cp-cc cp-copilot cp-cp
-        secret-cc secret-cp hc-add hc-rm doctor readme sh zsh sh-file zsh-file help )
+        secret-cc secret-cp cm hc-add hc-rm doctor readme sh zsh sh-file zsh-file help )
     fi
     return 0
   fi
@@ -1920,8 +1976,8 @@ _pm_candidates() {
     # the container and cannot be completed from the host
     cp)    if (( arg == 1 )); then _pm_list_containers --all
            elif (( arg == 2 )); then REPLY=files; fi ;;
-    # these run mkdir in the container, so it must be running
-    cp-claude|cp-cc|cp-copilot|cp-cp)
+    # these run mkdir or chezmoi in the container, so it must be running
+    cp-claude|cp-cc|cp-copilot|cp-cp|cm)
            (( arg == 1 )) && _pm_list_containers --filter status=running ;;
     # any container (V9-50, V9-51); hc-add needs a running one
     hc-add) (( arg == 1 )) && _pm_list_containers --filter status=running ;;
@@ -2047,7 +2103,7 @@ pm_usage() {
     'usage: pm <subcommand> [<args>]' \
     '       pm <subcommand> --help' \
     '' \
-    '  run        [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]' \
+    '  run        [--cc] [--cp] [--cm] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]' \
     '  start      <container>' \
     '  stop       <container>' \
     '  bash       <container>    interactive bash terminal in a running container' \
@@ -2059,6 +2115,7 @@ pm_usage() {
     '  cp-copilot <container>    alias cp-cp; instructions, settings, and config' \
     '  secret-cc                 store the Claude Code token as a podman secret' \
     '  secret-cp                 store the GitHub Copilot token as a podman secret' \
+    '  cm         <container>    apply the PM_CHEZMOI_REPO dotfiles with chezmoi' \
     '  hc-add     <container>    add a running container to hc here as a machine' \
     '  hc-rm      <container>    remove its hc machine; the container stays' \
     '  doctor                    check the tools pm needs' \
@@ -2074,7 +2131,7 @@ pm_usage() {
     '' \
     'environment: PM_CC_SECRET, PM_CC_TARGET, PM_CP_SECRET, PM_CP_TARGET,' \
     '             PM_CLAUDE_MD, PM_CLAUDE_SETTINGS, PM_COPILOT_SETTINGS,' \
-    '             PM_COPILOT_CONFIG'
+    '             PM_COPILOT_CONFIG, PM_CHEZMOI_REPO'
 }
 
 pm_readme() {
@@ -2242,6 +2299,7 @@ WHAT PM RUN RUNS
     [--secret ...] --name <container-name> <image> sleep infinity
       with --hc, in place of sleep infinity:
       sh -c 'exec hc serve >/dev/null 2>&1'
+    with --cm: as pm cm, the chezmoi one-shot of PM_CHEZMOI_REPO
     with --cc: as pm cp-claude, CLAUDE.md and settings into ~/.claude
     with --cp: as pm cp-copilot, instructions, settings, and config.json
       into ~/.copilot
@@ -2250,6 +2308,24 @@ WHAT PM RUN RUNS
     hc machine add --name <container-name>
       --via 'podman exec -i <container-name> sh -c'
   then: pm bash <container-name>
+
+CHEZMOI
+
+  pm run --cm and pm cm <container> apply a dotfiles repo with a chezmoi
+  one-shot, inside the container, as its user, from its home:
+    sh -c "\$(curl -fsLS get.chezmoi.io/lb)" -- init --one-shot --apply <repo>
+  The lb installer puts chezmoi into ~/.local/bin; --one-shot implies
+  --apply and --force, so chezmoi may overwrite existing files, and it
+  removes chezmoi and its source state afterwards.
+  PM_CHEZMOI_REPO names the repo, chezmoi turns site/user/repo into an
+  HTTPS clone URL; default: $_pm_chezmoi_default
+  pm run --cm runs it right after podman run,
+  before the --cc and --cp copies, so those copies win over the dotfiles;
+  pm writes herdr-core's config.toml (--hc) only when the dotfiles brought
+  none.
+  The container needs sh and curl, and the internet; a failure is a red
+  error with the output of curl or chezmoi, exit 1, and the container
+  stays.
 
 INSPECT
 
@@ -2282,6 +2358,7 @@ CONFIGURATION (environment variable and current value)
   PM_CLAUDE_SETTINGS   $PM_CLAUDE_SETTINGS
   PM_COPILOT_SETTINGS  $PM_COPILOT_SETTINGS
   PM_COPILOT_CONFIG    $PM_COPILOT_CONFIG
+  PM_CHEZMOI_REPO      $PM_CHEZMOI_REPO
 
 Every subcommand prints its details with --help, e.g. pm run --help.
 EOF
@@ -2303,6 +2380,7 @@ main() {
     cp-copilot|cp-cp)     pm_cp_copilot "$@" ;;
     secret-cc)            pm_secret secret-cc "$PM_CC_SECRET" "$PM_CC_TARGET" 'Claude Code' "$@" ;;
     secret-cp)            pm_secret secret-cp "$PM_CP_SECRET" "$PM_CP_TARGET" 'GitHub Copilot' "$@" ;;
+    cm)                   pm_cm "$@" ;;
     hc-add)               pm_hc_add "$@" ;;
     hc-rm)                pm_hc_rm "$@" ;;
     doctor)               pm_doctor "$@" ;;
