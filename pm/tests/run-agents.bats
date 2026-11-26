@@ -89,12 +89,11 @@ fs() { printf '%s\n' "$STUB_STATE/fs/pm-proj$1"; }
   [[ $stderr == *'error '*'Error: stub: podman cp failed'* ]] || fail "stderr: $stderr"
 }
 
-@test "run: the help names the copies in runs:, and the readme mentions them" {
-  run pm run --help
+@test "run: the readme names the copies in WHAT PM RUN RUNS, and mentions them" {
+  run pm readme
   expect_status 0
   [[ $output == *'with --cc: as pm cp-claude'* && $output == *'with --cp: as pm cp-copilot'* ]] \
-    || fail "help: $output"
-  run pm readme
+    || fail "readme: $output"
   expect_status 0
   [[ $output == *'pm run --cc'*'copies'* ]] || fail 'readme lacks the copies'
 }
@@ -157,8 +156,8 @@ fs() { printf '%s\n' "$STUB_STATE/fs/pm-proj$1"; }
   expect_status 0
   has_line "$output" "  PM_COPILOT_CONFIG    $PM_COPILOT_CONFIG"
   [[ $output != *PM_HC_SHELL* ]] || fail "pm readme: $output"
-  run pm run --help
+  run pm readme
   expect_status 0
   [[ $output == *'with --cp: as pm cp-copilot, instructions, settings, and config.json'* ]] \
-    || fail "help: $output"
+    || fail "readme: $output"
 }

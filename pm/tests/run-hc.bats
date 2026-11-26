@@ -649,40 +649,39 @@ esac'
   has_opt --label pm-script=9
 }
 
-@test "H2: pm run --help shows --hc and a herdr-core section" {
+@test "H2: pm run --help shows --hc, and the readme the herdr-core details" {
   run --separate-stderr pm run --help
   expect_status 0
   [ "${lines[0]}" = 'usage: pm run [--cc] [--cp] [--hc] [--mount <dir>] [--net <name>] <image> [<container-name>]' ]
   grep -qE '^  --hc +[a-z]' <<<"$output" || fail 'no option line for --hc'
-  has_line "$output" 'herdr-core:'
-  local section=${output#*$'\n'herdr-core:$'\n'} s
-  section=${section%%$'\n'runs:*}
-  for s in '<dir>/.devcontainer/herdr-machine-id' '<dir>/herdr-machine-id' \
-    '.config/herdr-core/container/<foldername>-<devcontainerId>' sha256 \
+  [[ $output == *'pm readme'* ]] || fail 'no pointer to pm readme'
+  [[ $output != *pm-hc* ]] || fail "pm run --help names pm-hc: $output"
+  # R1: the herdr-core details and the runs block live in pm readme
+  run pm readme
+  expect_status 0
+  local section=${output#*$'\n'HERDR-CORE$'\n'} s
+  section=${section%%$'\n'[A-Z]*}
+  for s in '.devcontainer/herdr-machine-id' 'myapp/herdr-machine-id' \
+    '.config/herdr-core/container/myapp-<devcontainerId>' sha256 \
     /etc/machine-id "$STATE_TARGET" config.toml 'shell = [ "/bin/bash" ]' 'hc serve' SIGTERM \
     'podman logs' 'hc server stop' 'hc server restart' 'hc update' 'hc machine update' \
-    'restart policy' 'podman exec -i <container-name> sh -c' 'exactly' \
+    'restart policy' 'podman exec -i <container> sh -c' 'exactly' \
     'hc machine' 'pm hc-add' 'pm start' rollback 'pm rm'; do
-    [[ $section == *"$s"* ]] || fail "the herdr-core section lacks: $s"
+    [[ $section == *"$s"* ]] || fail "the HERDR-CORE section lacks: $s"
   done
-  # V9-49: no pm-hc label anywhere in the help
-  [[ $output != *pm-hc* ]] || fail "pm run --help names pm-hc: $output"
+  # V9-49: no pm-hc label anywhere in the readme
+  [[ $output != *pm-hc* ]] || fail "pm readme names pm-hc: $output"
   # decisions 1, 3, 4: the runs block has the main command, the config, no
   # SHELL, and the machine with a bare podman
-  [[ $output == *"sh -c 'exec hc serve >/dev/null 2>&1'"* ]] || fail 'runs: lacks the main command'
-  [[ $output == *'with --hc: shell = [ "/bin/bash" ] into ~/.config/herdr-core/config.toml'* ]] \
+  section=${output#*$'\n'WHAT PM RUN RUNS$'\n'}
+  section=${section%%$'\n'[A-Z]*}
+  [[ $section == *"sh -c 'exec hc serve >/dev/null 2>&1'"* ]] || fail 'runs: lacks the main command'
+  [[ $section == *'with --hc: shell = [ "/bin/bash" ] into ~/.config/herdr-core/config.toml'* ]] \
     || fail 'runs: lacks the config'
-  [[ $output != *'-e SHELL'* && $output != *PM_HC_SHELL* && $output != *'podman path'* ]] \
-    || fail "help: $output"
-  [[ $output == *'hc machine add --name <container-name>'* ]] || fail 'runs: lacks hc machine add'
-  [[ $output == *"--via 'podman exec -i <container-name> sh -c'"* ]] || fail 'runs: lacks the bare podman'
-  # D23: one container per folder, with its limits
-  has_line "$output" 'one container per folder:'
-  section=${output#*$'\n'one container per folder:$'\n'}
-  section=${section%%$'\n\n'*}
-  for s in 'podman containers' Docker 'as spelled' 'podman run'; do
-    [[ $section == *"$s"* ]] || fail "the one container per folder section lacks: $s"
-  done
+  [[ $output != *'-e SHELL'* && $output != *PM_HC_SHELL* && $output != *'another podman path'* ]] \
+    || fail "readme: $output"
+  [[ $section == *'hc machine add --name <container-name>'* ]] || fail 'runs: lacks hc machine add'
+  [[ $section == *"--via 'podman exec -i <container-name> sh -c'"* ]] || fail 'runs: lacks the bare podman'
 }
 
 @test "H3: pm help lists --hc in the run line" {
