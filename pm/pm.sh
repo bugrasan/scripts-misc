@@ -1006,10 +1006,17 @@ note: the hc machine ls before hc machine add starts the hc core on this
     _pm_err "no hc on PATH; install it on this host to add $name as an hc machine"
     return 1
   fi
-  # any image may have another user than vscode, so ask for its home once
+  # any image may have another user than vscode, so ask for its home once;
+  # only stdout is the home: podman may warn on stderr, which pm shows only
+  # when the exec fails, as pm rm does (F2-01)
   # shellcheck disable=SC2016  # $HOME expands in the container's sh
-  if ! home=$(podman exec -- "$name" sh -c 'printf %s "$HOME"' 2>&1) || [[ $home != /* ]]; then
-    _pm_err "$name: cannot read the home of the container user: ${home//$'\n'/ }"
+  if ! home=$(podman exec -- "$name" sh -c 'printf %s "$HOME"' 2>/dev/null); then
+    out=$(podman exec -- "$name" sh -c 'printf %s "$HOME"' 2>&1 >/dev/null)
+    _pm_err "$name: cannot read the home of the container user: ${out//$'\n'/ }"
+    return 1
+  fi
+  if [[ $home != /* ]]; then
+    _pm_err "$name: cannot read the home of the container user: not an absolute path: $home"
     return 1
   fi
 
