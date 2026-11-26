@@ -106,15 +106,18 @@ case ${1-} in
             net=$(val containers "$id") ms='' secs=''
             if [[ $fmt == *NetworkMode* ]]; then
               # pm ps: id, name, status, pm-script, devcontainer folder,
-              # target=source mounts, networks, network mode, pm-hc and
-              # create command as json, mount secrets
+              # target=source mounts, networks, network mode, the pm-hc
+              # label as json only when asked (pm before V9-49), create
+              # command as json, mount secrets
               if [[ -e $s/mounts/$id ]]; then
                 while IFS= read -r m; do ms+="${m#*:}=${m%%:*};"; done <"$s/mounts/$id"
               fi
               if [[ -e $s/secrets/$id ]]; then
                 while IFS= read -r m; do secs+=$m$rs; done <"$s/secrets/$id"
               fi
-              printf '%s\n' "$id$us$id$us$(status "$id")$us$(val pmscript "$id")$us$us$ms$us${net:+$net,}$us${net:+bridge}${net:-pasta}$us$(jlabel "$id")$us$(jcreate "$id")$us$secs"
+              hcl=''
+              [[ $fmt != *pm-hc* ]] || hcl=$(jlabel "$id")$us
+              printf '%s\n' "$id$us$id$us$(status "$id")$us$(val pmscript "$id")$us$us$ms$us${net:+$net,}$us${net:+bridge}${net:-pasta}$us$hcl$(jcreate "$id")$us$secs"
             else
               # pm run: names and bind-mount sources
               if [[ -e $s/mounts/$id ]]; then

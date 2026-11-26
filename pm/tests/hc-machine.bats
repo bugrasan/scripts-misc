@@ -131,6 +131,8 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
 
 @test "decision 4: only the exact connection is pm's; an absolute podman path and look-alikes are another" {
   local t
+  # pm rm asks hc only while the host core runs (V9-52)
+  host_core_up
   # target|via: absolute podman paths (pm's before decision 4), other
   # commands, no via, more or less around pm's text, another container
   for t in '/usr/local/bin/podman exec -i pm-proj sh -c|true' \
@@ -296,11 +298,12 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   if podman_find rm; then podman_show; fail 'pm ran podman rm'; fi
 }
 
-@test "V9-53: pm rm --hc-rm twice is a usage error" {
+@test "V9-53: a repeated --hc-rm is harmless, as a repeated --force" {
   fake_container pm-x
-  run --separate-stderr pm rm --hc-rm --hc-rm pm-x
-  expect_status 2
-  [[ $stderr == 'usage: pm rm'* ]] || fail "stderr: $stderr"
+  run --separate-stderr pm rm --hc-rm --force --hc-rm --force pm-x
+  expect_status 0
+  has_line "$output" 'ok    container pm-x removed'
+  hc_find -x machine ls --json || { hc_show; fail 'no hc machine ls'; }
 }
 
 # ------------------------------------------------------------------ Q24

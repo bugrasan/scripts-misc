@@ -511,15 +511,13 @@ herdr-core:
   pm keeps a machine of that name with exactly this connection, stops with
   an error for any other, and only notes when hc is not on PATH; the hc
   machine ls it runs first starts the core on this host when none runs
-  the label pm-hc=<container-name> marks the container: pm rm removes its
-  hc machine; podman sets labels only at creation, so containers made
-  without --hc or by an older pm get no herdr-core handling until made
-  again with pm run --hc
+  pm hc-add and pm hc-rm add and remove the hc machine of any container
+  later; pm rm removes it while the core on this host runs, or with --hc-rm
   pm keeps the id file and the state folder on rollback and on pm rm
 
 runs: podman network create -o isolate=strict --label pm-script=$PM_VERSION <network>
       podman run -d --init --userns=keep-id --label pm-script=$PM_VERSION
-      [--label pm-hc=<container-name>] [--network <network>] [-v ...]
+      [--network <network>] [-v ...]
       [--secret ...] --name <container-name> <image> sleep infinity
         with --hc, in place of sleep infinity:
         sh -c 'exec hc serve >/dev/null 2>&1'
@@ -663,14 +661,13 @@ then: pm bash <container-name>"
     fi
   fi
 
-  # herdr-core files are ready before pm creates anything in podman; the
-  # label lets pm rm and pm hc-add find containers made with --hc
+  # herdr-core files are ready before pm creates anything in podman; no
+  # label marks the container, as podman cannot add one later (V9-49)
   local main=(sleep infinity)
   if (( hc )); then
     _pm_hc_prepare "$abs" || return 1
     opts+=(-v "$_pm_hc_file:/etc/machine-id:ro"
-      -v "$_pm_hc_state:/home/vscode/.local/state/herdr-core"
-      --label "pm-hc=$name")
+      -v "$_pm_hc_state:/home/vscode/.local/state/herdr-core")
     # the core as the main command: exec makes hc serve the init's direct
     # child, which gets podman stop's SIGTERM; its output stays out of
     # podman logs (Q27); without hc in the image, podman run succeeds, but
@@ -792,39 +789,50 @@ runs: podman exec -it <container> bash'
 # ------------------------------------------------------------------ pm rm / net
 
 pm_rm() {
-  local help='usage: pm rm [--force] <container>
+  local help='usage: pm rm [--force] [--hc-rm] <container>
 
-removes a container, then its hc machine if pm run --hc made it (label
-pm-hc), then each network pm created for it once no other container uses
-that network
+removes a container, then its hc machine on this host, then each network
+pm created for it once no other container uses that network
 
   --force      stop a running container first
+  --hc-rm      look for the hc machine also when the hc core on this host
+               does not run, which starts it; without hc on PATH, an error
+               before anything is removed
   <container>  container to remove; completion lists all containers
 
+the hc machine is the one named after the container; pm removes it only
+while it has exactly the connection pm run --hc and pm hc-add give it;
+pm asks hc only while the hc core on this host runs, as hc machine ls
+would start one, else a skip line; --hc-rm asks anyway
+
 runs: podman rm [-f] <container>
-      hc machine rm <container>  (label pm-hc, while the machine still has
-      exactly the connection that pm run gave it)
-      podman network rm <network>
-note: the hc machine ls before hc machine rm starts the hc core on this
-      host when none runs'
-  local force=0 c='' a out state net label users rc=0
+      hc machine rm <container>  (while the hc core on this host runs, or
+      with --hc-rm)
+      podman network rm <network>'
+  local force=0 hcrm=0 c='' a out state net label users rc=0
   local -a lines rmopt=()
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
-  # pm's force options are long only, so -f falls under unknown options
+  # pm's force options are long only, so -f falls under unknown options;
+  # a repeated flag is harmless
   for a; do
     case $a in
       --force) force=1 ;;
+      --hc-rm) hcrm=1 ;;
       -*)      _pm_usage "$help"; return 2 ;;
       *)       [[ -z $c ]] || { _pm_usage "$help"; return 2; }; c=$a ;;
     esac
   done
   [[ -n $c ]] || { _pm_usage "$help"; return 2; }
+  # --hc-rm promises the machine removal, so fail before removing anything
+  if (( hcrm )) && ! command -v hc >/dev/null 2>&1; then
+    _pm_err "no hc on PATH; install it on this host to remove the hc machine $c"
+    return 1
+  fi
 
-  # read state, pm-hc label, and networks first: all vanish with the
-  # container; stderr stays out of the parsed lines: podman warnings would
-  # corrupt them
+  # read state and networks first: both vanish with the container; stderr
+  # stays out of the parsed lines: podman warnings would corrupt them
   if ! out=$(podman container inspect --format \
-    '{{.State.Status}}{{"\n"}}{{json (index .Config.Labels "pm-hc")}}{{range $k, $v := .NetworkSettings.Networks}}{{"\n"}}{{$k}}{{end}}' \
+    '{{.State.Status}}{{range $k, $v := .NetworkSettings.Networks}}{{"\n"}}{{$k}}{{end}}' \
     -- "$c" 2>/dev/null); then
     out=$(podman container inspect -- "$c" 2>&1 >/dev/null)
     _pm_err "container $c: $out"
@@ -844,14 +852,17 @@ note: the hc machine ls before hc machine rm starts the hc core on this
     return 1
   fi
 
-  # a container made with pm run --hc: forget its hc machine on this host;
-  # the label comes as a JSON string, and pm's own labels need no escapes
-  label=${lines[1]-}
-  label=${label#\"} label=${label%\"}
-  if [[ -n $label ]]; then _pm_hc_rm "$label" || rc=1; fi
+  # forget the container's hc machine on this host, whoever added it;
+  # hc machine ls would start a stopped host core, so only --hc-rm asks
+  # hc then (V9-52, V9-53)
+  if (( hcrm )) || ! command -v hc >/dev/null 2>&1 || _pm_host_core_running; then
+    _pm_hc_rm "$c" || rc=1
+  else
+    _pm_skip "hc machine $c: hc core on this host not running; not checked"
+  fi
 
   # only networks with the pm-script label; podman's own stay untouched
-  for net in "${lines[@]:2}"; do
+  for net in "${lines[@]:1}"; do
     [[ -n $net ]] || continue
     label=$(podman network inspect --format '{{index .Labels "pm-script"}}' "$net" 2>/dev/null) \
       || continue
@@ -932,78 +943,102 @@ lists all networks with the containers attached to each
 
 # ------------------------------------------------------------------ pm hc-add / hc-rm
 
-# the pm-hc label of container $1 (pm run --hc set it; empty without), and
-# with $2 = 1 also its state after a unit separator; errors as red lines;
-# podman prints the label as a JSON string, which pm's labels need no
-# escapes in
-_pm_hc_label() {
-  local fmt='{{json (index .Config.Labels "pm-hc")}}' out
-  (( ${2:-0} )) && fmt+=$'\x1f''{{.State.Status}}'
-  if ! out=$(podman container inspect --format "$fmt" -- "$1" 2>/dev/null); then
+# the state of container $1, then its mount targets, one per line, from
+# one inspect; a red error line when podman does not know the container
+_pm_ctr_mounts() {
+  local out us=$'\x1f'
+  if ! out=$(podman container inspect --format \
+    "{{.State.Status}}{{range .Mounts}}$us{{.Destination}}{{end}}" -- "$1" 2>/dev/null); then
     out=$(podman container inspect -- "$1" 2>&1 >/dev/null)
     _pm_err "container $1: $out"
     return 1
   fi
-  out=${out#\"} out=${out/\"$'\x1f'/$'\x1f'} out=${out%\"}
-  if [[ -z ${out%%$'\x1f'*} ]]; then
-    _pm_err "$1 has no pm-hc label; only pm run --hc sets it, when it creates a container"
-    return 1
-  fi
-  printf '%s\n' "$out"
+  printf '%s\n' "${out//$us/$'\n'}"
 }
 
 pm_hc_add() {
   local help="usage: pm hc-add <container>
 
-adds a container made with pm run --hc to hc on this host as the hc machine
-named in its label pm-hc, as pm run --hc does; it only adds the machine,
-as the core already runs there as the container's main command, hc serve;
-it keeps a machine of that name with exactly pm's connection and stops
-with an error for one with another
+adds any running container to hc on this host as the hc machine named
+after it, as pm run --hc does: first shell = [ \"/bin/bash\" ] into
+~/.config/herdr-core/config.toml in the container when that file is
+missing, else a skip line, then the machine; it keeps a machine of that
+name with exactly pm's connection and stops with an error for one with
+another; the core in the container starts on the first connection
 
-  <container>  running container with the label pm-hc; completion lists
-               those
+  <container>  running container whose name hc takes as a machine name;
+               completion lists the running containers
 
+a container without the mounts of pm run --hc at /etc/machine-id and
+/home/vscode/.local/state/herdr-core gets a note: its hc identity and state
+end with the container; pm run --hc makes a container that keeps them
+
+runs: podman exec -i <name> sh -c ...  (config.toml, when missing)
 runs: hc machine add --name <name> --via 'podman exec -i <name> sh -c'
 needs: hc on PATH
 note: the hc machine ls before hc machine add starts the hc core on this
       host when none runs"
-  local out m state
+  local out state t m hcstate=/home/vscode/.local/state/herdr-core rc=0
+  local -a info missing=()
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
   if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
-  out=$(_pm_hc_label "$1" 1) || return 1
-  IFS=$'\x1f' read -r m state <<<"$out"
+  out=$(_pm_ctr_mounts "$1") || return 1
+  mapfile -t info <<<"$out"
+  state=${info[0]}
   if [[ $state != running ]]; then
     _pm_err "container $1 is $state; start it with: pm start $1"
     return 1
   fi
-  if ! command -v hc >/dev/null 2>&1; then
-    _pm_err "no hc on PATH; install it on this host to add $m as an hc machine"
+  if ! _pm_hc_name_ok "$1"; then
+    _pm_err "hc cannot use $1 as a machine name: 1-32 of a-z 0-9 - _ ., a letter or digit first, not like t7"
     return 1
   fi
-  _pm_hc_add "$m" 'pm hc-add'
+  if ! command -v hc >/dev/null 2>&1; then
+    _pm_err "no hc on PATH; install it on this host to add $1 as an hc machine"
+    return 1
+  fi
+
+  # the identity and state survive a new container only through the two
+  # bind mounts of pm run --hc; podman cannot add mounts later (V9-50)
+  for t in /etc/machine-id "$hcstate"; do
+    for m in "${info[@]:1}"; do [[ $m == "$t" ]] && continue 2; done
+    missing+=("$t")
+  done
+  if (( ${#missing[@]} )); then
+    t=${missing[0]}
+    (( ${#missing[@]} == 1 )) || t+=" and ${missing[1]}"
+    printf 'pm hc-add: note: %s does not mount %s from the host, so its hc identity and state end with the container; pm run --hc makes a container that keeps them\n' \
+      "$1" "$t" >&2
+  fi
+
+  # the same steps as pm run --hc; a failed config write still adds the
+  # machine, as there
+  _pm_hc_config "$1" || rc=1
+  _pm_hc_add "$1" 'pm hc-add' || rc=1
+  return $rc
 }
 
 pm_hc_rm() {
   local help="usage: pm hc-rm <container>
 
-removes the hc machine of a container made with pm run --hc from hc on this
-host, as pm rm does; the container stays, running or not
+removes the hc machine named after a container from hc on this host, as pm
+rm does, whoever added it; the container stays, running or not
 
-  <container>  container with the label pm-hc; completion lists those
+  <container>  existing container; completion lists all containers
 
 a machine that is gone gives a skip line; one with another connection is an
-error, as pm removes only its own, with exactly podman exec -i <name> sh -c
+error, as pm removes only its own, with exactly podman exec -i <name> sh -c;
+remove a machine of a container that is gone in the herdr app or with hc
+machine rm
 
 runs: hc machine rm <name>
 needs: hc on PATH
 note: the hc machine ls before hc machine rm starts the hc core on this
       host when none runs"
-  local m
   _pm_wants_help "$@" && { printf '%s\n' "$help"; return 0; }
   if [[ $# -ne 1 || -z $1 || $1 == -* ]]; then _pm_usage "$help"; return 2; fi
-  m=$(_pm_hc_label "$1") || return 1
-  _pm_hc_rm "$m" 1
+  _pm_ctr_mounts "$1" >/dev/null || return 1
+  _pm_hc_rm "$1" 1
 }
 
 # ------------------------------------------------------------------ pm doctor
@@ -1134,26 +1169,26 @@ optional, shown only:
 # agent columns of pm ps --agents before PROJECT
 _pm_ps_table() {
   local all=$1 agents=${2:-0} ids fmt sep=$'\x1f' rs=$'\x1e' id name status pm
-  local folder mounts nets mode hcl cmd secs project m w=4 pw=2 nw=7 cw=9 pcw=9
+  local folder mounts nets mode cmd secs project m w=4 pw=2 nw=7 cw=9 pcw=9
   local i n row hf='' af=''
-  local -a ms r_id r_name r_status r_pm r_net r_hc r_cmd r_sec r_project
+  local -a ms r_id r_name r_status r_pm r_net r_cmd r_sec r_project
   local -a r_cont r_host r_scc r_ccc r_scp r_ccp
   if (( all )); then ids=$(podman ps -a -q) || return 1
   else ids=$(podman ps -q) || return 1; fi
 
   if [[ -n $ids ]]; then
     # one inspect call for every container; fields split by the unit
-    # separator, so empty fields survive `read`; the pm-hc label and the
-    # create command come as JSON, so no newline in them splits a row
+    # separator, so empty fields survive `read`; the create command comes
+    # as JSON, so no newline in it splits a row
     fmt="{{printf \"%.12s\" .ID}}$sep{{.Name}}$sep{{.State.Status}}$sep"
     fmt+="{{index .Config.Labels \"pm-script\"}}$sep"
     fmt+="{{index .Config.Labels \"devcontainer.local_folder\"}}$sep"
     fmt+="{{range .Mounts}}{{.Destination}}={{.Source}};{{end}}$sep"
     fmt+="{{range \$k, \$v := .NetworkSettings.Networks}}{{\$k}},{{end}}$sep"
-    fmt+="{{.HostConfig.NetworkMode}}$sep{{json (index .Config.Labels \"pm-hc\")}}$sep"
+    fmt+="{{.HostConfig.NetworkMode}}$sep"
     fmt+="{{json .Config.CreateCommand}}$sep{{range .Config.Secrets}}{{.Name}}$rs{{end}}"
     # shellcheck disable=SC2086  # ids is a newline-separated list
-    while IFS=$sep read -r id name status pm folder mounts nets mode hcl cmd secs; do
+    while IFS=$sep read -r id name status pm folder mounts nets mode cmd secs; do
       # project: devcontainer label, else the host folder mounted at
       # /workspaces/<name>, ignoring the worktrees mount
       project=$folder
@@ -1169,11 +1204,9 @@ _pm_ps_table() {
       # networks by name, else the network mode in parentheses, as pm net
       nets=${nets%,}
       [[ -n $nets ]] || nets="($mode)"
-      # pm's own labels need no JSON escapes
-      hcl=${hcl#\"} hcl=${hcl%\"}
       n=${#r_id[@]}
       r_id[n]=$id r_name[n]=$name r_status[n]=$status r_pm[n]=${pm:+v$pm}
-      r_net[n]=$nets r_hc[n]=$hcl r_cmd[n]=$cmd r_sec[n]=$rs$secs r_project[n]=$project
+      r_net[n]=$nets r_cmd[n]=$cmd r_sec[n]=$rs$secs r_project[n]=$project
       (( ${#name} > w )) && w=${#name}
       (( ${#r_pm[n]} > pw )) && pw=${#r_pm[n]}
       (( ${#nets} > nw )) && nw=${#nets}
@@ -1269,9 +1302,9 @@ _pm_ps_herdr() {
         *)                           r_cont[i]=unavailable ;;
       esac
     fi
-    # on the host: the machine pm adds for it, named by the pm-hc label
+    # on the host: the machine named after the container (V9-49)
     if [[ $host != list ]]; then r_host[i]=$host; continue; fi
-    m=${r_hc[i]:-${r_name[i]}}
+    m=${r_name[i]}
     via=$(_pm_hc_via "$m")
     if _pm_hc_entry "$ls" "$m" "$via"; then r_host[i]=yes
     else r_host[i]=no; fi
@@ -1659,6 +1692,30 @@ _pm_candidates_run() {
   _pm_reply=( $(podman image list --format '{{.Repository}}:{{.Tag}}' 2>/dev/null | grep -vF '<none>') )
 }
 
+# candidates for `pm rm`: --force and --hc-rm in any position, each once,
+# and one container; --help only first; an unknown flag such as -f ends
+# the completion
+_pm_candidates_rm() {
+  local n=${#_pm_words[@]} i force=0 hcrm=0 ctr=0
+  local cur=${_pm_words[n-1]}
+  for (( i = 2; i < n - 1; i++ )); do
+    case ${_pm_words[i]} in
+      --force) force=1 ;;
+      --hc-rm) hcrm=1 ;;
+      -*)      return 0 ;;
+      *)       ctr=1 ;;
+    esac
+  done
+  if [[ $cur == -* ]]; then
+    _pm_kind=words
+    (( force )) || _pm_reply[${#_pm_reply[@]}]=--force
+    (( hcrm )) || _pm_reply[${#_pm_reply[@]}]=--hc-rm
+    (( n > 3 )) || _pm_reply[${#_pm_reply[@]}]=--help
+    return 0
+  fi
+  (( ctr )) || _pm_list_containers --all
+}
+
 # set _pm_kind (words, dirs, files, or none) and _pm_reply (unfiltered words)
 # from _pm_words; the last element is the word being completed
 _pm_candidates() {
@@ -1680,14 +1737,11 @@ _pm_candidates() {
   fi
 
   [[ $sub == run ]] && { _pm_candidates_run; return 0; }
+  [[ $sub == rm ]] && { _pm_candidates_rm; return 0; }
 
   # flags of the other subcommands, offered for the first argument only;
-  # pm rm also takes --force after the container, and pm ps the other of
-  # its two table flags
+  # pm ps also takes the other of its two table flags
   if [[ $cur == -* ]]; then
-    if [[ $sub == rm ]] && (( arg == 2 )) && [[ ${_pm_words[2]} != -* ]]; then
-      _pm_kind=words; _pm_reply=(--force); return 0
-    fi
     if [[ $sub == ps ]] && (( arg == 2 )); then
       case ${_pm_words[2]} in
         -a|--all) _pm_kind=words; _pm_reply=(--agents) ;;
@@ -1699,7 +1753,6 @@ _pm_candidates() {
     _pm_kind=words
     case $sub in
       ps)               _pm_reply=(-a --all --agents --help) ;;
-      rm)               _pm_reply=(--force --help) ;;
       sh-file|zsh-file) _pm_reply=(--force --help) ;;
       *)                _pm_reply=(--help) ;;
     esac
@@ -1711,10 +1764,6 @@ _pm_candidates() {
     start) (( arg == 1 )) && _pm_list_containers --all \
              --filter status=created --filter status=exited --filter status=stopped ;;
     stop|bash) (( arg == 1 )) && _pm_list_containers --filter status=running ;;
-    # the container follows an optional --force
-    rm)    if (( arg == 1 )) || [[ $arg == 2 && ${_pm_words[2]} == --force ]]; then
-             _pm_list_containers --all
-           fi ;;
     # view keywords plus container names, then names after a keyword
     ps)    if (( arg == 1 )); then
              _pm_kind=words
@@ -1731,9 +1780,9 @@ _pm_candidates() {
     # these run mkdir in the container, so it must be running
     cp-claude|cp-cc|cp-copilot|cp-cp)
            (( arg == 1 )) && _pm_list_containers --filter status=running ;;
-    # containers made with pm run --hc; hc-add needs a running one
-    hc-add) (( arg == 1 )) && _pm_list_containers --filter status=running --filter label=pm-hc ;;
-    hc-rm) (( arg == 1 )) && _pm_list_containers --all --filter label=pm-hc ;;
+    # any container (V9-50, V9-51); hc-add needs a running one
+    hc-add) (( arg == 1 )) && _pm_list_containers --filter status=running ;;
+    hc-rm) (( arg == 1 )) && _pm_list_containers --all ;;
     sh-file|zsh-file) (( arg == 1 )) && { _pm_kind=words; _pm_reply=(--force); } ;;
   esac
   return 0
@@ -1827,6 +1876,29 @@ _pm_candidates_run() {
   reply=( ${reply:#*"<none>"*} )
 }
 
+# candidates for `pm rm`: --force and --hc-rm in any position, each once,
+# and one container; --help only first; an unknown flag such as -f ends
+# the completion
+_pm_candidates_rm() {
+  local i force=0 hcrm=0 ctr=0 cur=${words[CURRENT]}
+  for (( i = 3; i < CURRENT; i++ )); do
+    case ${words[i]} in
+      --force) force=1 ;;
+      --hc-rm) hcrm=1 ;;
+      -*)      return 0 ;;
+      *)       ctr=1 ;;
+    esac
+  done
+  if [[ $cur == -* ]]; then
+    REPLY=words
+    (( force )) || reply+=( --force )
+    (( hcrm )) || reply+=( --hc-rm )
+    (( CURRENT > 3 )) || reply+=( --help )
+    return 0
+  fi
+  (( ctr )) || _pm_list_containers --all
+}
+
 # set REPLY (words, dirs, files, or none) and reply (unfiltered words)
 # from words and CURRENT; words[1] is `pm` or `pm.sh`
 _pm_candidates() {
@@ -1848,14 +1920,11 @@ _pm_candidates() {
   fi
 
   [[ $sub == run ]] && { _pm_candidates_run; return 0; }
+  [[ $sub == rm ]] && { _pm_candidates_rm; return 0; }
 
   # flags of the other subcommands, offered for the first argument only;
-  # pm rm also takes --force after the container, and pm ps the other of
-  # its two table flags
+  # pm ps also takes the other of its two table flags
   if [[ $cur == -* ]]; then
-    if [[ $sub == rm ]] && (( arg == 2 )) && [[ ${words[3]} != -* ]]; then
-      REPLY=words; reply=( --force ); return 0
-    fi
     if [[ $sub == ps ]] && (( arg == 2 )); then
       case ${words[3]} in
         -a|--all) REPLY=words; reply=( --agents ) ;;
@@ -1867,7 +1936,6 @@ _pm_candidates() {
     REPLY=words
     case $sub in
       ps)               reply=( -a --all --agents --help ) ;;
-      rm)               reply=( --force --help ) ;;
       sh-file|zsh-file) reply=( --force --help ) ;;
       *)                reply=( --help ) ;;
     esac
@@ -1879,10 +1947,6 @@ _pm_candidates() {
     start) (( arg == 1 )) && _pm_list_containers --all \
              --filter status=created --filter status=exited --filter status=stopped ;;
     stop|bash) (( arg == 1 )) && _pm_list_containers --filter status=running ;;
-    # the container follows an optional --force
-    rm)    if (( arg == 1 )) || [[ $arg == 2 && ${words[3]} == --force ]]; then
-             _pm_list_containers --all
-           fi ;;
     # view keywords plus container names, then names after a keyword
     ps)    if (( arg == 1 )); then
              REPLY=words
@@ -1899,9 +1963,9 @@ _pm_candidates() {
     # these run mkdir in the container, so it must be running
     cp-claude|cp-cc|cp-copilot|cp-cp)
            (( arg == 1 )) && _pm_list_containers --filter status=running ;;
-    # containers made with pm run --hc; hc-add needs a running one
-    hc-add) (( arg == 1 )) && _pm_list_containers --filter status=running --filter label=pm-hc ;;
-    hc-rm) (( arg == 1 )) && _pm_list_containers --all --filter label=pm-hc ;;
+    # any container (V9-50, V9-51); hc-add needs a running one
+    hc-add) (( arg == 1 )) && _pm_list_containers --filter status=running ;;
+    hc-rm) (( arg == 1 )) && _pm_list_containers --all ;;
     sh-file|zsh-file) (( arg == 1 )) && { REPLY=words; reply=( --force ); } ;;
   esac
   return 0
@@ -2027,7 +2091,7 @@ pm_usage() {
     '  start      <container>' \
     '  stop       <container>' \
     '  bash       <container>    interactive bash terminal in a running container' \
-    '  rm         [--force] <container>  remove it, its pm network once unused, and its hc machine' \
+    '  rm         [--force] [--hc-rm] <container>  remove it, its pm network once unused, and its hc machine' \
     '  ps         [-a] [--agents] | <container> | labels|mounts|ns|id [<container>]' \
     '  net        networks and their containers' \
     '  cp         <container> <local-file> <dest-name>' \
@@ -2035,7 +2099,7 @@ pm_usage() {
     '  cp-copilot <container>    alias cp-cp; instructions, settings, and config' \
     '  secret-cc                 store the Claude Code token as a podman secret' \
     '  secret-cp                 store the GitHub Copilot token as a podman secret' \
-    '  hc-add     <container>    add a pm run --hc container to hc here as a machine' \
+    '  hc-add     <container>    add a running container to hc here as a machine' \
     '  hc-rm      <container>    remove its hc machine; the container stays' \
     '  doctor                    check the tools pm needs' \
     '  readme     quick start' \
@@ -2172,16 +2236,16 @@ HERDR-CORE
     ~/src/myapp/herdr-machine-id
     ~/.config/herdr-core/container/myapp-<sha256 of the id>
 
-  Such a container carries the label pm-hc=<container>: pm rm removes its
-  hc machine. podman sets labels only when it creates a container, so a
-  container made without --hc or by an older pm gets none of this; make it
-  again with pm run --hc.
   Without hc on PATH, pm adds no machine and says so. pm hc-add <container>
-  adds the machine later, for example once hc is installed, and pm hc-rm
-  <container> removes it and keeps the container. Like pm run --hc and pm
-  rm, both run hc machine ls first, which starts the hc core on this host
-  when none runs; pm ps never starts one and shows HOST-HERDR stopped
-  instead.
+  adds the machine of any running container later, for example once hc is
+  installed, with the same bash config.toml; podman cannot add mounts to an
+  existing container, so a container made without --hc gets a note that
+  its hc identity and state end with it. pm hc-rm <container> removes the
+  machine of any container and keeps the container. Both run hc machine ls
+  first, as pm run --hc does, which starts the hc core on this host when
+  none runs. pm rm removes the machine named after the container only while
+  that core runs, else it gives a skip line; pm rm --hc-rm asks hc anyway.
+  pm ps never starts a core and shows HOST-HERDR stopped instead.
   A machine is pm's only with exactly that connection: one with another,
   also with an absolute podman path, stays as it is: pm run --hc and pm
   hc-add stop with an error, pm rm keeps it with a skip line, pm hc-rm
