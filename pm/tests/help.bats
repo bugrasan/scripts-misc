@@ -49,7 +49,7 @@ readme_section() {
   local sec s
   sec=$(readme_section "$output" 'NETWORK ISOLATION')
   for s in 'isolate=strict' "pm-script=$PM_VERSION_EXPECTED" 'another driver' \
-    'other than strict' 'e.g. bridge, host, none' 'if podman run fails'; do
+    'other than strict' 'e.g. bridge, host, none' 'If podman run fails'; do
     [[ $sec == *"$s"* ]] || fail "NETWORK ISOLATION lacks: $s"
   done
   sec=$(readme_section "$output" 'HERDR-CORE')

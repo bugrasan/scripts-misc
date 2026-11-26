@@ -448,88 +448,19 @@ pm_run() {
                     config as pm cp-copilot
   --hc              run the herdr-core core, hc serve, as the container's
                     main command, with a stable identity, and add the
-                    container to hc here as a machine; needs --mount, see
-                    herdr-core
-  --mount <dir>     mount <dir> at /workspaces/<foldername> and, if it exists,
-  --mnt <dir>       <dir>/../<foldername>.worktrees at
-                    /workspaces/<foldername>.worktrees; unless a name is given,
-                    call the container pm-<foldername>
-  --net <name>      network name; default with --mount: the folder name with
-                    characters podman rejects replaced by -, and pm- in front
-                    when it starts with no letter or digit or is reserved by
-                    podman (e.g. bridge, host, none)
+                    container to hc here as a machine; needs --mount
+  --mount <dir>     mount <dir> at /workspaces/<foldername>, and
+  --mnt <dir>       <dir>/../<foldername>.worktrees when it exists; default
+                    name pm-<foldername>; one container per folder
+  --net <name>      isolated network; default with --mount: the folder name
   <image>           image to run, e.g. mcr.microsoft.com/devcontainers/base:bookworm
   <container-name>  name for the new container; required without --mount;
                     with --hc also the hc machine name, so 1-32 of a-z 0-9
                     - _ ., a letter or digit first, and not like t7
 
-one container per folder:
-  pm creates no second container for <dir>: when a podman container
-  already mounts it, or with --hc its herdr-core state folder, pm stops
-  with an error, says how to use that container (pm start, pm bash) or
-  make it again (pm rm --force, then pm run), and shows a podman run line
-  that makes a second one by hand; pm sees only podman containers, not
-  those of other engines such as Docker, and compares paths as spelled
-
-network isolation:
-  with --mount or --net, the container joins a bridge network created with
-  -o isolate=strict and the label pm-script=$PM_VERSION; pm reuses an
-  existing network with that label and notes other containers on it; it
-  refuses a network without the label, with another driver, or with an
-  isolate value other than strict
-  without --mount and --net, the container uses podman's default network
-  mode and is not isolated
-  pm rm removes the network once no container uses it
-  if podman run fails, pm removes the container and network it created
-
-herdr-core:
-  with --hc, the container's main command is hc serve, not sleep infinity:
-  the init passes podman stop's SIGTERM on to it, so the core stops
-  cleanly, and its output stays out of podman logs; whenever the core
-  stops, the container stops: hc server stop, hc server restart, hc update,
-  hc machine update from this host, or a crash; there is no restart policy,
-  so pm start brings the container and its core back; with an image
-  without hc, or a core that exits at once, the container stops right
-  after it starts: pm reports the error and exits 1, and the container
-  stays until pm rm removes it
-  an id file and a state folder on the host keep the core's identity;
-  with a <dir>/.devcontainer folder, at the dev container template's paths:
-    id file       <dir>/.devcontainer/herdr-machine-id
-    state folder  ~/.config/herdr-core/container/<foldername>-<devcontainerId>
-  without it:
-    id file       <dir>/herdr-machine-id
-    state folder  ~/.config/herdr-core/container/<foldername>-<sha256 of id>
-  pm writes a missing or invalid id file, creates a missing state folder,
-  mounts the id file at /etc/machine-id (read-only) and the state folder at
-  /home/vscode/.local/state/herdr-core, and after podman run writes
-  ~/.config/herdr-core/config.toml in the container with
-  shell = [ \"/bin/bash\" ] when that file is missing, else a skip line: the
-  core reads it for each new shell, also while it runs, and the
-  container's environment gets no SHELL, so other tools keep theirs
-  after podman run, pm adds the container to hc on this host as the hc machine
-  <container-name>, connected through podman exec -i <container-name> sh -c,
-  a bare podman, so podman must be on the PATH of the hc core on this host;
-  pm keeps a machine of that name with exactly this connection, stops with
-  an error for any other, and only notes when hc is not on PATH; the hc
-  machine ls it runs first starts the core on this host when none runs
-  pm hc-add and pm hc-rm add and remove the hc machine of any container
-  later; pm rm removes it while the core on this host runs, or with --hc-rm
-  pm keeps the id file and the state folder on rollback and on pm rm
-
-runs: podman network create -o isolate=strict --label pm-script=$PM_VERSION <network>
-      podman run -d --init --userns=keep-id --label pm-script=$PM_VERSION
-      [--network <network>] [-v ...]
-      [--secret ...] --name <container-name> <image> sleep infinity
-        with --hc, in place of sleep infinity:
-        sh -c 'exec hc serve >/dev/null 2>&1'
-      with --cc: as pm cp-claude, CLAUDE.md and settings into ~/.claude
-      with --cp: as pm cp-copilot, instructions, settings, and config.json
-        into ~/.copilot
-      with --hc: shell = [ \"/bin/bash\" ] into ~/.config/herdr-core/config.toml
-        when missing, by podman exec -i <container-name> sh -c ...
-      hc machine add --name <container-name>
-        --via 'podman exec -i <container-name> sh -c'
-then: pm bash <container-name>"
+then: pm bash <container-name>
+details in pm readme: ONE CONTAINER PER FOLDER, NETWORK ISOLATION,
+HERDR-CORE, and WHAT PM RUN RUNS"
   # --init forwards signals to the main command, so pm stop does not wait
   # for the SIGKILL timeout; keep-id maps the host UID/GID into the
   # container so bind-mounted files keep their ownership (rootless podman
@@ -2198,13 +2129,18 @@ QUICK START
 NETWORK ISOLATION
 
   With --mount or --net, the container joins a bridge network created with
-  -o isolate=strict, which blocks traffic to and from all other bridge
-  networks. The network is named after the folder (characters podman
-  rejects become -, pm- goes in front when needed) or after --net <name>.
-  pm reuses a network it created earlier and refuses any other network.
+  -o isolate=strict and the label pm-script=$PM_VERSION, which blocks
+  traffic to and from all other bridge networks. The network is named after
+  the folder (characters podman rejects become -, pm- goes in front when it
+  starts with no letter or digit or is reserved by podman,
+  e.g. bridge, host, none) or after --net <name>.
+  pm reuses an existing network with that label and notes other containers
+  on it; it refuses a network without the label, with another driver, or
+  with an isolate value other than strict.
   Without --mount and --net, the container uses podman's default network
   mode and is not isolated. pm rm removes the network once no container
   uses it; pm net lists all networks with their containers.
+  If podman run fails, pm removes the container and network it created.
 
 ONE CONTAINER PER FOLDER
 
@@ -2244,15 +2180,19 @@ HERDR-CORE
   podman, so podman must be on the core's PATH.
   The init passes the SIGTERM of pm stop on to hc serve, so the core saves
   its state and stops, and pm start brings it back; hc's output stays out
-  of podman logs. Whenever the core stops, the container stops: hc server
-  stop, hc server restart, hc update, hc machine update from this host, or
-  a crash. There is no restart policy, so start it again with pm start.
+  of podman logs. Whenever the core stops, the container stops:
+  hc server stop, hc server restart, hc update, hc machine update from this
+  host, or a crash. There is no restart policy, so start it again with pm start.
   With an image without hc, or a core that exits at once, the container
   stops right after it starts: pm reports the error and exits 1, and the
   container stays until pm rm removes it.
+  The core reads config.toml for each new shell, also while it runs; when
+  the file exists, pm keeps it with a skip line.
   The identity lives on the host in an id file, mounted read-only at
   /etc/machine-id, and a state folder, mounted at
-  /home/vscode/.local/state/herdr-core:
+  /home/vscode/.local/state/herdr-core.
+  pm writes a missing or invalid id file and creates a missing state
+  folder, and keeps both on rollback and on pm rm:
 
   pm run --hc --mount ~/src/myapp <image>   # an image with hc on its PATH
   hc exec --on pm-myapp uname -a            # runs in the container
@@ -2293,6 +2233,23 @@ HERDR-CORE
   .devcontainer/<name>/devcontainer.json gets another devcontainerId, so
   that dev container shares the id file but not the state folder. Keep the
   id file out of git; pm notes when git does not ignore it.
+
+WHAT PM RUN RUNS
+
+  podman network create -o isolate=strict --label pm-script=$PM_VERSION <network>
+  podman run -d --init --userns=keep-id --label pm-script=$PM_VERSION
+    [--network <network>] [-v ...]
+    [--secret ...] --name <container-name> <image> sleep infinity
+      with --hc, in place of sleep infinity:
+      sh -c 'exec hc serve >/dev/null 2>&1'
+    with --cc: as pm cp-claude, CLAUDE.md and settings into ~/.claude
+    with --cp: as pm cp-copilot, instructions, settings, and config.json
+      into ~/.copilot
+    with --hc: shell = [ "/bin/bash" ] into ~/.config/herdr-core/config.toml
+      when missing, by podman exec -i <container-name> sh -c ...
+    hc machine add --name <container-name>
+      --via 'podman exec -i <container-name> sh -c'
+  then: pm bash <container-name>
 
 INSPECT
 
