@@ -41,7 +41,7 @@ machines() { local IFS=,; printf '{"machines":[%s]}' "$*"; }
   expect_status 0
   local r
   r=$(ps_row pm-proj)
-  [ "$(ps_cell PM "$r")" = v9 ]
+  [ "$(ps_cell PM "$r")" = v10 ]
   [ "$(ps_cell NETWORK "$r")" = proj ]
   [ "$(ps_cell PROJECT "$r")" = "$P" ]
   r=$(ps_row old)

@@ -639,14 +639,14 @@ esac'
 
 # ------------------------------------------------------------------ H1 to H4
 
-@test "H1, V9-01: pm --version prints pm 9, and pm run labels with pm-script=9" {
+@test "H1, V10-01: pm --version prints pm 10, and pm run labels with pm-script=10" {
   run pm --version
   expect_status 0
-  [ "$output" = 'pm 9' ]
+  [ "$output" = 'pm 10' ]
   run --separate-stderr pm run --hc --mount "$P" "$IMG"
   expect_status 0
   run_args
-  has_opt --label pm-script=9
+  has_opt --label pm-script=10
 }
 
 @test "H2: pm run --help shows --hc, and the readme the herdr-core details" {

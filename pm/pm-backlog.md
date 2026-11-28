@@ -225,6 +225,14 @@ Tests (bats-core, `pm/tests/`):
 - V9-57: the fake podman runs pm's own chezmoi script from `/`, with the container's home below `fs/<name>` as HOME and a PATH of only sh and a fake curl (`stub/cm-curl`), whose output, a fake installer, records its arguments and working directory there; STUB_CM_CURL=fail or missing, STUB_CM_INSTALL_RC, and STUB_CM_INSTALL_LINES drive the failures; `cm.bats` (now 22 stub tests) adds the installer's arguments `init --one-shot --apply -- <repo>` and its working directory, a `/root` home, a failing and a missing curl, the last 20 lines of a failing installer, the `runs:` lines, `-- --cm` as a container name, `pm cm box --help`, and no completion after `pm cm --help`; `help.bats` checks that every option description of `pm run --help` starts in one column; `cm-podman.bats` (CMF1-03, CMF1-09) needs PM_TEST_CHEZMOI_FILE, a file the repo creates, checks it in the home, and drops a teardown line for a container it never makes; against `docs/pm-run-help` (bc9500f), 23 of the 213 stub tests fail; not run here (no podman)
 - V9-58: `version.bats` (4 stub tests) checks that `pm version`, `pm ver`, and `pm --version` print the same line, the usage lines for `-h` and `--help`, the usage errors with exit 2, and the `version` line of `pm help`; `completion.bats` checks that `pm ''` offers `version` and `ver`, and `pm -` still `--version`, in bash and zsh
 
+## v10 (delivered in pm.sh, PM_VERSION=10)
+
+- V10-01 `PM_VERSION=10`: `pm --version`, `pm version`, and `pm ver` print `pm 10`, and `pm run` labels containers and networks with `pm-script=10`
+
+Tests (bats-core, `pm/tests/`):
+
+- V10-01: the H1 test of `run-hc.bats` expects `pm 10` and the label `pm-script=10`, the PM column checks of `ps.bats` and `run-hc-podman.bats` expect `v10`, and `help.bats` and `version.bats` read the version from `pm --version`
+
 ## Open findings
 
 - major (v7 review) – `--userns=keep-id` maps the host UID, so on hosts where it is not 1000 the container user cannot write `/home/vscode`; fix candidate: `--userns=keep-id:uid=1000,gid=1000` or `PM_USERNS`; v9 impact, seen with podman 6.2 and the host user mapped to UID 501 (`--userns=keep-id:uid=501,gid=501`): HOME stays /home/vscode and podman adds a passwd entry (`501:*:501:501:container user:/home/vscode:/bin/sh`), but /home/vscode (mode 700, owner vscode) denies writing below it, so the copies of `pm run --cc`/`--cp` (and `pm cp-claude`, `pm cp-copilot`) and agents that write their settings in the home folder fail on such hosts; the owner's Mac maps keep-id to UID 1000, so this stays a note for bug reports (owner decision R1), and the readme says how to check (V9-36)

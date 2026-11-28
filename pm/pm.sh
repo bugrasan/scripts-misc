@@ -18,7 +18,7 @@ elif (return 0 2>/dev/null); then
   return 2
 fi
 
-PM_VERSION=9
+PM_VERSION=10
 
 # an exported CDPATH would make `cd` pick another directory and print it
 unset CDPATH

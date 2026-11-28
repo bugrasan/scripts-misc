@@ -436,7 +436,7 @@ real_row() { grep -m1 -E "^[0123456789abcdef]{12} +$1( |$)" <<<"$output"; }
   expect_status 0
   local r
   r=$(real_row "$CTR") || fail "no row for $CTR in: $output"
-  [ "$(ps_cell PM "$r")" = "v9" ]
+  [ "$(ps_cell PM "$r")" = "v10" ]
   [ "$(ps_cell NETWORK "$r")" = "$NET" ]
   [ "$(ps_cell CONT-HERDR "$r")" = running ]
   [ "$(ps_cell HOST-HERDR "$r")" = yes ]
