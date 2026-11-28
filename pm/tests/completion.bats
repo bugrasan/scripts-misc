@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
-# stub tests for the completion of pm run --hc (H5 of the v8 spec) and of
-# pm rm --force (V9-05): the _pm_candidates functions of `pm sh` (bash) and
-# `pm zsh` (zsh), called with prepared words; the fake podman answers the
-# image and container lists
+# stub tests for the completion of pm run --hc (H5 of the v8 spec), of
+# pm rm --force (V9-05), and of pm version (V9-58): the _pm_candidates
+# functions of `pm sh` (bash) and `pm zsh` (zsh), called with prepared words;
+# the fake podman answers the image and container lists
 # run: bats pm/tests/completion.bats
 
 load test_helper
@@ -115,6 +115,27 @@ v9_completion() {
 @test "v9 zsh: hc-add, hc-rm, doctor, and pm ps --agents complete" {
   need_zsh
   v9_completion zsh_candidates
+}
+
+# version_completion <bash_candidates|zsh_candidates>: V9-58, pm '' offers
+# version and its alias ver, and pm - still offers --version
+version_completion() {
+  run --separate-stderr "$1" pm ''
+  expect_status 0
+  has_line "$output" version
+  has_line "$output" ver
+  run --separate-stderr "$1" pm -
+  expect_status 0
+  has_line "$output" --version
+}
+
+@test "V9-58 bash: pm '' offers version and ver" {
+  version_completion bash_candidates
+}
+
+@test "V9-58 zsh: pm '' offers version and ver" {
+  need_zsh
+  version_completion zsh_candidates
 }
 
 @test "V9-05 bash: pm rm completes --force but not -f, and containers after --force" {

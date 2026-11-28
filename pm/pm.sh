@@ -1758,7 +1758,8 @@ _pm_candidates() {
       _pm_reply=(-h --help --version)
     else
       _pm_reply=(run start stop bash rm ps net cp cp-claude cp-cc cp-copilot cp-cp
-        secret-cc secret-cp cm hc-add hc-rm doctor readme sh zsh sh-file zsh-file help)
+        secret-cc secret-cp cm hc-add hc-rm doctor readme sh zsh sh-file zsh-file help
+        version ver)
     fi
     return 0
   fi
@@ -1941,7 +1942,8 @@ _pm_candidates() {
       reply=( -h --help --version )
     else
       reply=( run start stop bash rm ps net cp cp-claude cp-cc cp-copilot cp-cp
-        secret-cc secret-cp cm hc-add hc-rm doctor readme sh zsh sh-file zsh-file help )
+        secret-cc secret-cp cm hc-add hc-rm doctor readme sh zsh sh-file zsh-file help
+        version ver )
     fi
     return 0
   fi
@@ -2138,11 +2140,21 @@ pm_usage() {
     '  zsh-file   [--force]  write zsh completion to:' \
     "               $(_pm_zsh_file)" \
     '  help       show this help; also -h and --help' \
-    '  --version  print the version' \
+    '  version    print the version; alias ver, also --version' \
     '' \
     'environment: PM_CC_SECRET, PM_CC_TARGET, PM_CP_SECRET, PM_CP_TARGET,' \
     '             PM_CLAUDE_MD, PM_CLAUDE_SETTINGS, PM_COPILOT_SETTINGS,' \
     '             PM_COPILOT_CONFIG, PM_CHEZMOI_REPO'
+}
+
+# pm version, pm ver, and pm --version: print the version; $1 is the usage
+# line of the spelling used, for --help and for usage errors
+pm_version() {
+  local usage=$1
+  shift
+  if _pm_wants_help "$@"; then printf '%s\n' "$usage"; return 0; fi
+  if (( $# )); then _pm_usage "$usage"; return 2; fi
+  printf 'pm %s\n' "$PM_VERSION"
 }
 
 pm_readme() {
@@ -2403,9 +2415,8 @@ main() {
     zsh-file)             pm_write_file zsh "$@" ;;
     help|-h|--help)       if (( $# )) && ! _pm_wants_help "$@"; then pm_usage >&2; return 2; fi
                           pm_usage ;;
-    --version)            if _pm_wants_help "$@"; then printf '%s\n' 'usage: pm --version'; return 0; fi
-                          if (( $# )); then _pm_usage 'usage: pm --version'; return 2; fi
-                          printf 'pm %s\n' "$PM_VERSION" ;;
+    version|ver)          pm_version 'usage: pm version     (alias: pm ver)' "$@" ;;
+    --version)            pm_version 'usage: pm --version' "$@" ;;
     '')                   pm_usage >&2; return 2 ;;
     *)                    printf 'pm: unknown subcommand: %s\n\n' "$cmd" >&2
                           pm_usage >&2
